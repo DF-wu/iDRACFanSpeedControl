@@ -9,7 +9,7 @@ This script is written down as a `shell`. That's you can run it in `shell` envir
   + If you are Windows user, the ipmi is also command works with windows supported ipmi binary.
 1. For the very first step. You need `ipmitool` and `bc` installed. Fortunately, it's easy to find out in most package repository.
    + For `Arch-Linux` user: `sudo pacman -S ipmitool bc`.
-   + For `Debian` or `Ubuntu` users: `sudo apt install ipmitool bc`.
+   + For `Debian` or `Ubuntu` users: `sudo apt install ipmitool bc -y`.
 2. Enable your iDRAC ipmi LAN function:
    + In my iDRAC 8 interface, it seems like:
      + ![Alt text](/imgaes/image.png)
