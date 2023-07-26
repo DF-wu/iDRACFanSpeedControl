@@ -14,6 +14,6 @@ This script is written down as a `shell`. That's you can run it in `shell` envir
    + In my iDRAC 8 interface, it seems like:
      + ![Alt text](/imgaes/image.png)
 3. clone this repo or just download the script.
-4. Replace the variable `iDRAC_IP=REPLACE_TO_YOUR_IDRAC_IP` to your iDRAC IP address.
-   + The result should seem like `iDRAC_IP=192.168.10.9`
+4. Replace the variable `iDRAC_IP`,`IDRAC_ID` and `IDRAC_PASSWORD` with your iDRAC secret.
+   + The result should seem like `iDRAC_IP=192.168.10.9` and etc. blababla.
 5. execute the shell. `sh ./setIdracFanSpeed.` and follow the script prompt.
