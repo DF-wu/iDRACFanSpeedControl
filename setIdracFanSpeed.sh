@@ -15,10 +15,10 @@ hexFanSpeed=$(echo "obase=16;$fanSpeed" | bc)
 echo "Your input is ${fanSpeed}. The hexadecimal value is ${hexFanSpeed}."
 
 #set fan control to manual
-ipmitool -I lanplus  -H ${iDRAC_IP}  -U ${IDRAC_ID} -P ${IDRAC_PASSWORD} raw 0x30 0x30 0x01 0x00
+ipmitool -I lanplus  -H ${IDRAC_IP}  -U ${IDRAC_ID} -P ${IDRAC_PASSWORD} raw 0x30 0x30 0x01 0x00
 # replace raw config 
 rawConfigCommand="0x30 0x30 0x02 0xff 0x"${hexFanSpeed}
 #set fan speed to target duty cycle
 # ipmitool -I lanplus  -H 192.168.10.9  -U root -P zxcv6319 raw 0x30 0x30 0x02 0xff 0x25
-ipmitool -I lanplus  -H ${iDRAC_IP} -U ${IDRAC_ID} -P ${IDRAC_PASSWORD} raw ${rawConfigCommand}
+ipmitool -I lanplus  -H ${IDRAC_IP} -U ${IDRAC_ID} -P ${IDRAC_PASSWORD} raw ${rawConfigCommand}
 echo "done"
