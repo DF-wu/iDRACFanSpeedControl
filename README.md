@@ -39,7 +39,6 @@ You can configure the script by setting the following variables:
 Docker image is in `ghcr.io/df-wu/idrac-fan-control`. You can simply use it with [Docker](https://docs.docker.com/engine/install).
 
 1. ![dokcer-compose.yml](/docker-compose.yml)
-2. rename the `example.env` to `.env`.
-3. modify the arrtibutes in `.env` according to your system.
-4. run `docker-compose up -d`
-5. done.
+2. modify the arrtibutes in `.env` according to your system.
+3. run `docker-compose up -d`
+4. done.
