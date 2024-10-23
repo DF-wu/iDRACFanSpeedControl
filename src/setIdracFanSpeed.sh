@@ -15,6 +15,9 @@ read fanSpeed
 hexFanSpeed=$(echo "obase=16;$fanSpeed" | bc)
 echo "Your input is ${fanSpeed}. The hexadecimal value is ${hexFanSpeed}."
 
+# auto fan speed control raw command: 0x30 0x30 0x01 0x01
+
+
 #set fan control to manual
 ipmitool -I lanplus  -H ${IDRAC_IP}  -U ${IDRAC_ID} -P ${IDRAC_PASSWORD} raw 0x30 0x30 0x01 0x00
 # replace raw config 
