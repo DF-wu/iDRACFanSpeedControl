@@ -1,0 +1,9 @@
+version: '3'
+
+services:
+  idrac-fan-control:
+    container_name: idrac-fan-control
+    image: ghcr.io/df-wu/idrac-fan-control:latest
+    env_file:
+      - .env
+    restart: always
