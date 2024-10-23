@@ -3,15 +3,13 @@
 FROM alpine:latest
 
 # Install required packages (ipmitool, bash, bc for hex conversion)
-RUN apk add --no-cache --version bash ipmitool bc
+RUN apk add --no-cache  bash ipmitool bc
 
 # Copy the fan control script into the container
-COPY src/FanControlWithEsxiSmart.sh /usr/local/bin/FanControlWithEsxiSmart.sh
+COPY src/FanControlWithEsxiSmart.sh /usr/FanControlWithEsxiSmart.sh
 
-RUN chmod 755 /usr/local/bin/FanControlWithEsxiSmart.sh
+RUN chmod 755 /usr/FanControlWithEsxiSmart.sh
 
-# Copy the environment file into the container
-COPY src/.env /usr/local/bin/.env
 
 # optional
 # Set the environment variables (you can override these during runtime)
@@ -22,7 +20,7 @@ COPY src/.env /usr/local/bin/.env
 # ENV OPERATION_MODE="auto"
 
 # Set the working directory to /usr/local/bin
-WORKDIR /usr/local/bin
+WORKDIR /usr
 
 # Set the entrypoint to the fan control script
-ENTRYPOINT ["/usr/local/bin/FanControlWithEsxiSmart.sh"]
+ENTRYPOINT ["bash","/usr/local/bin/FanControlWithEsxiSmart.sh"]
