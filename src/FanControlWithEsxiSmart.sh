@@ -42,7 +42,7 @@ ESXI_PASSWORD=${ESXI_PASSWORD:-"REPLACE_TO_YOUR_ESXI_PASSWORD"}
 get_drive_temp() {
     local temp=$(sshpass -p "${ESXI_PASSWORD}" ssh -o StrictHostKeyChecking=no "${ESXI_USERNAME}@${ESXI_HOST}" \
         "esxcli storage core device smart get -d ${DRIVE_DEVICE}" | \
-        awk '/Drive Temperature/ {print \$3}')
+        awk '/Drive Temperature/ {print $3}')
     echo "${temp:-0}"
 }
 
