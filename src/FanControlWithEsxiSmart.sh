@@ -10,7 +10,7 @@ PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
 IDRAC_IP=${IDRAC_IP:-"REPLACE_TO_YOUR_IDRAC_IP"}
 IDRAC_ID=${IDRAC_ID:-"REPLACE_TO_YOUR_IDRAC_ID"}
 IDRAC_PASSWORD=${IDRAC_PASSWORD:-"REPLACE_TO_YOUR_IDRAC_PASSWORD"}
-DRIVE_DEVICE=${DRIVE_DEVICE:-"t10.NVMe____KCD61LUL7T68_________________________"}
+DRIVE_DEVICE=${DRIVE_DEVICE:-"t10.NVMe____KCD61LUL7T68____________________________015E8306E28EE38C"}
 
 # Temperature thresholds (Celsius)   -xx means default value
 TEMP_LOW=${TEMP_LOW:-45}
@@ -40,10 +40,9 @@ ESXI_PASSWORD=${ESXI_PASSWORD:-"REPLACE_TO_YOUR_ESXI_PASSWORD"}
  
 # Function to get current drive temperature
 get_drive_temp() {
-
     local temp=$(sshpass -p "${ESXI_PASSWORD}" ssh -o StrictHostKeyChecking=no "${ESXI_USERNAME}@${ESXI_HOST}" \
-        "esxcli storage core device smart get -d \"$DRIVE_DEVICE\"" | \
-        awk '/Drive Temperature/ {print $3}')
+        "esxcli storage core device smart get -d ${DRIVE_DEVICE}" | \
+        awk '/Drive Temperature/ {print \$3}')
     echo "${temp:-0}"
 }
 
