@@ -6,11 +6,9 @@ FROM alpine:latest
 RUN apk add --no-cache --version bash ipmitool bc
 
 # Copy the fan control script into the container
-COPY src/FanControlWithEsxiSmart.sh /usr/local/bin/fan_control.sh
+COPY src/FanControlWithEsxiSmart.sh /usr/local/bin/FanControlWithEsxiSmart.sh
 
-# Copy the set IDRAC fan speed script into the container
-COPY src/setIdracFanSpeed.sh /usr/local/bin/set_idrac_fan_speed.sh
-RUN chmod 755 /usr/local/bin/set_idrac_fan_speed.sh
+RUN chmod 755 /usr/local/bin/FanControlWithEsxiSmart.sh
 
 # Copy the environment file into the container
 COPY src/.env /usr/local/bin/.env
@@ -27,4 +25,4 @@ COPY src/.env /usr/local/bin/.env
 WORKDIR /usr/local/bin
 
 # Set the entrypoint to the fan control script
-ENTRYPOINT ["/usr/local/bin/fan_control.sh"]
+ENTRYPOINT ["/usr/local/bin/FanControlWithEsxiSmart.sh"]
