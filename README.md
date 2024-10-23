@@ -19,7 +19,7 @@ If you are Windows user, the ipmi is also command works with windows supported i
    + The result should seem like `iDRAC_IP=192.168.10.9` and etc. blababla.
 4. execute the shell. `sh ./setIdracFanSpeed.` and follow the script prompt.
 
-### Fan Control With Esxi Smart
+### Fan Control With Esxi Smart (**TODO**)
 This script is designed to control the fan speed of your Dell PowerEdge server based on the temperature of the NVMe drive. It uses the esxcli command to get the temperature of the drive and then sets the fan speed accordingly.
 
 #### Configuration

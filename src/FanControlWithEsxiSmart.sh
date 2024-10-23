@@ -30,9 +30,19 @@ OPERATION_MODE=${OPERATION_MODE:-"manual"}
 # Check interval (seconds) for auto mode
 CHECK_INTERVAL=${CHECK_INTERVAL:-60}
 
+
+
+# ESXi variables
+ESXI_HOST=${ESXI_HOST:-"REPLACE_TO_YOUR_ESXI_HOST"}
+ESXI_USERNAME=${ESXI_USERNAME:-"REPLACE_TO_YOUR_ESXI_USERNAME"}
+ESXI_PASSWORD=${ESXI_PASSWORD:-"REPLACE_TO_YOUR_ESXI_PASSWORD"}
+
+ 
 # Function to get current drive temperature
 get_drive_temp() {
-    local temp=$(esxcli storage core device smart get -d "$DRIVE_DEVICE" | \
+
+    local temp=$(sshpass -p "${ESXI_PASSWORD}" ssh -o StrictHostKeyChecking=no "${ESXI_USERNAME}@${ESXI_HOST}" \
+        "esxcli storage core device smart get -d \"$DRIVE_DEVICE\"" | \
         awk '/Drive Temperature/ {print $3}')
     echo "${temp:-0}"
 }
@@ -76,6 +86,9 @@ validate_config() {
         echo "Error: IDRAC_PASSWORD not configured"
         error=1
     fi
+
+    
+
     
     if [ $error -eq 1 ]; then
         exit 1
