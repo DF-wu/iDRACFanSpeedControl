@@ -13,7 +13,7 @@ COPY src/setIdracFanSpeed.sh /usr/local/bin/set_idrac_fan_speed.sh
 RUN chmod 755 /usr/local/bin/set_idrac_fan_speed.sh
 
 # Copy the environment file into the container
-COPY .env /usr/local/bin/.env
+COPY src/.env /usr/local/bin/.env
 
 # optional
 # Set the environment variables (you can override these during runtime)
