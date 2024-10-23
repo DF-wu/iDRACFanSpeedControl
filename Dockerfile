@@ -1,6 +1,6 @@
 # Dockerfile
 # Use Alpine  as the base image for its small size
-FROM alpine:lastest⁠
+FROM alpine:latest
 
 # Install required packages (ipmitool, bash, bc for hex conversion)
 RUN apk add --no-cache --version bash ipmitool bc
