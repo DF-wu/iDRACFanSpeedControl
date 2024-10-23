@@ -23,4 +23,4 @@ RUN chmod 755 /usr/FanControlWithEsxiSmart.sh
 WORKDIR /usr
 
 # Set the entrypoint to the fan control script
-ENTRYPOINT ["bash","/usr/local/bin/FanControlWithEsxiSmart.sh"]
+ENTRYPOINT ["bash","/usr/FanControlWithEsxiSmart.sh"]
