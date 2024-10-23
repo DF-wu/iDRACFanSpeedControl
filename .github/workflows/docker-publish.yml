@@ -22,12 +22,20 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Convert repository owner to lowercase
+      id: repo_owner_lowercase
+      run: echo "REPO_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+    - name: Log repository owner
+      run: echo "Repository owner in lowercase is $REPO_OWNER"
+
+
     # Step 3: Build the Docker image
     - name: Build Docker image
       run: |
-        docker build -t ghcr.io/${{ github.repository_owner }}/idrac-fan-control:latest .
+        docker build -t ghcr.io/$REPO_OWNER/idrac-fan-control:latest .
 
     # Step 4: Push the Docker image to GHCR
     - name: Push Docker image
       run: |
-        docker push ghcr.io/${{ github.repository_owner }}/idrac-fan-control:latest
+        docker push ghcr.io/$REPO_OWNER/idrac-fan-control:latest
