@@ -3,7 +3,7 @@
 FROM alpine:latest
 
 # Install required packages (ipmitool, bash, bc for hex conversion)
-RUN apk add --no-cache  bash ipmitool bc sshpass
+RUN apk add --no-cache ssh bash ipmitool bc sshpass
 
 # Copy the fan control script into the container
 COPY src/FanControlWithEsxiSmart.sh /usr/FanControlWithEsxiSmart.sh
