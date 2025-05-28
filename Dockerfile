@@ -1,7 +1,7 @@
 # Dockerfile for iDRAC Fan Speed Control with GPU Support
-# 基於 NVIDIA 的 Ubuntu 基礎映像檔以支援 GPU 溫度監控
+# 基於 NVIDIA 的 Ubuntu 24.04 基礎映像檔以支援 GPU 溫度監控
 # 如果不需要 GPU 支援，可以改用 alpine:latest
-FROM nvidia/cuda:11.8-base-ubuntu22.04
+FROM nvidia/cuda:12.9.0-runtime-ubuntu24.04
 
 # 設定維護者資訊
 LABEL maintainer="iDRAC Fan Control Service"

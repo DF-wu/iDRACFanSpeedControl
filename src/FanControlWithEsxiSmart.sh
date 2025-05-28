@@ -34,6 +34,8 @@ CHECK_INTERVAL=${CHECK_INTERVAL:-60}
 # 預設為 false，只有當使用者明確設定 WITH_GPU_TEMP=true 時才啟用 GPU 溫度監控
 WITH_GPU_TEMP=${WITH_GPU_TEMP:-"false"}
 
+GPU_TEMP_OFFSET=${GPU_TEMP_OFFSET:-15}
+
 # ESXi variables
 ESXI_HOST=${ESXI_HOST:-"REPLACE_TO_YOUR_ESXI_HOST"}
 ESXI_USERNAME=${ESXI_USERNAME:-"REPLACE_TO_YOUR_ESXI_USERNAME"}
@@ -66,7 +68,7 @@ get_nvidia_temp() {
 }
 
 # Function to calculate decision temperature
-# 決策溫度 = max(磁碟溫度, GPU溫度-20)
+# 決策溫度 = max(磁碟溫度, GPU溫度 - GPU_TEMP_OFFSET)
 # 這個邏輯確保風扇轉速基於較高的溫度來源進行調節
 get_decision_temp() {
     local disk_temp=$(get_drive_temp)
@@ -75,7 +77,7 @@ get_decision_temp() {
     # 只有在啟用 GPU 溫度監控時才考慮 GPU 溫度
     if [[ "$WITH_GPU_TEMP" == "true" ]]; then
         local gpu_temp=$(get_nvidia_temp)
-        local gpu_adjusted_temp=$((gpu_temp - 20))
+        local gpu_adjusted_temp=$((gpu_temp - GPU_TEMP_OFFSET))
         
         # 記錄原始溫度用於除錯
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Debug: Disk=${disk_temp}°C, GPU=${gpu_temp}°C, GPU_Adjusted=${gpu_adjusted_temp}°C" >&2
@@ -85,7 +87,7 @@ get_decision_temp() {
             decision_temp=$gpu_adjusted_temp
         fi
         
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Decision temperature: ${decision_temp}°C (Disk: ${disk_temp}°C, GPU-20: ${gpu_adjusted_temp}°C)" >&2
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Decision temperature: ${decision_temp}°C (Disk: ${disk_temp}°C, GPU-${GPU_TEMP_OFFSET}: ${gpu_adjusted_temp}°C)" >&2
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Decision temperature: ${decision_temp}°C (Disk only mode)" >&2
     fi
@@ -159,10 +161,9 @@ manual_mode() {
 
 # Function to run in automatic mode
 auto_mode() {
-    echo "Automatic fan speed control mode"
-    if [[ "$WITH_GPU_TEMP" == "true" ]]; then
+    echo "Automatic fan speed control mode"    if [[ "$WITH_GPU_TEMP" == "true" ]]; then
         echo "GPU temperature monitoring enabled - using decision temperature logic"
-        echo "Decision Temperature = max(Disk Temperature, GPU Temperature - 20°C)"
+        echo "Decision Temperature = max(Disk Temperature, GPU Temperature - ${GPU_TEMP_OFFSET}°C)"
     else
         echo "GPU temperature monitoring disabled - using disk temperature only"
     fi

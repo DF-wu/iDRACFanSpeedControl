@@ -307,7 +307,7 @@ ssh root@your_esxi_host
 
 ```bash
 # Verify NVIDIA Container Toolkit installation
-docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.9.0-runtime-ubuntu24.04 nvidia-smi
 
 # Check if GPU is accessible in container
 docker exec idrac-fan-control nvidia-smi

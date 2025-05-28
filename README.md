@@ -12,7 +12,7 @@
 - 🎮 **GPU Temperature Support**: Optional GPU temperature monitoring with NVIDIA Container Toolkit
 - ⚙️ **Environment Variable Control**: Complete configuration through `.env` files
 - 🐳 **Docker Deployment**: One-click deployment with no manual environment setup
-- 🔥 **Decision Temperature Algorithm**: `max(disk_temp, gpu_temp - 20°C)` ensures optimal cooling
+- 🔥 **Decision Temperature Algorithm**: `max(disk_temp, gpu_temp - GPU_TEMP_OFFSET)` ensures optimal cooling
 - 📊 **Configurable Thresholds**: Customize temperature and fan speed settings
 - 🔄 **Auto/Manual Modes**: Flexible operation modes for different use cases
 
@@ -105,22 +105,24 @@ CHECK_INTERVAL=60     # Check interval in seconds (auto mode only)
 When GPU temperature monitoring is enabled, the system uses this algorithm to calculate the decision temperature:
 
 ```text
-Decision Temperature = max(Disk Temperature, GPU Temperature - 20°C)
+Decision Temperature = max(Disk Temperature, GPU Temperature - GPU_TEMP_OFFSET)
 ```
 
 This algorithm ensures:
 
 - **Proactive GPU cooling**: High GPU temperatures trigger increased fan speeds
-- **Temperature offset compensation**: Accounts for thermal differences between GPU and system
+- **Configurable offset compensation**: Adjustable offset (`GPU_TEMP_OFFSET`) accounts for thermal differences between GPU and system
 - **Disk temperature baseline**: Disk temperature always serves as the minimum baseline
 
 ### Algorithm Examples
 
-| Disk Temp | GPU Temp | GPU-20 | Decision Temp | Reasoning |
+With default `GPU_TEMP_OFFSET=15°C`:
+
+| Disk Temp | GPU Temp | GPU-15 | Decision Temp | Reasoning |
 |-----------|----------|--------|---------------|-----------|
-| 65°C | 70°C | 50°C | **65°C** | Disk temperature is higher |
-| 65°C | 90°C | 70°C | **70°C** | GPU-20 is higher, use adjusted GPU temp |
-| 75°C | 80°C | 60°C | **75°C** | Disk temperature remains baseline |
+| 65°C | 70°C | 55°C | **65°C** | Disk temperature is higher |
+| 65°C | 85°C | 70°C | **70°C** | GPU-15 is higher, use adjusted GPU temp |
+| 75°C | 80°C | 65°C | **75°C** | Disk temperature remains baseline |
 
 ## 🔧 Troubleshooting
 
@@ -133,7 +135,7 @@ This algorithm ensures:
 nvidia-smi
 
 # Verify Docker GPU support
-docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.9.0-runtime-ubuntu24.04 nvidia-smi
 ```
 
 #### Cannot Connect to ESXi Host
@@ -184,6 +186,7 @@ docker exec idrac-fan-control tail -f /var/log/fan-control/fan_control.log
 | `OPERATION_MODE` | auto | Operation mode (auto/manual) |
 | `CHECK_INTERVAL` | 60 | Check interval in seconds |
 | `WITH_GPU_TEMP` | false | Enable GPU temperature monitoring |
+| `GPU_TEMP_OFFSET` | 15 | GPU temperature offset for decision algorithm (°C) |
 
 ## 🐳 Docker Compose Examples
 
