@@ -161,7 +161,8 @@ manual_mode() {
 
 # Function to run in automatic mode
 auto_mode() {
-    echo "Automatic fan speed control mode"    if [[ "$WITH_GPU_TEMP" == "true" ]]; then
+    echo "Automatic fan speed control mode"
+    if [[ "$WITH_GPU_TEMP" == "true" ]]; then
         echo "GPU temperature monitoring enabled - using decision temperature logic"
         echo "Decision Temperature = max(Disk Temperature, GPU Temperature - ${GPU_TEMP_OFFSET}°C)"
     else
