@@ -1,9 +1,30 @@
-version: '3'
+version: '3.8'
 
 services:
   idrac-fan-control:
     container_name: idrac-fan-control
     image: ghcr.io/df-wu/idrac-fan-control:latest
     env_file:
-      - .env
+      - .env  # 使用者可以將自己的 .env 文件掛載到此位置
+    volumes:
+      # 可選：掛載日誌目錄以保存風扇控制日誌
+      - ./logs:/app/logs
+      # 可選：掛載自定義 .env 文件（取消註解以使用）
+      # - /path/to/your/custom/.env:/app/.env:ro
+    networks:
+      - host  # 使用主機網路以便 IPMI 通訊
     restart: always
+    
+    # 如果啟用 GPU 溫度監控 (WITH_GPU_TEMP=true)，請取消註解下面的 GPU 配置
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    
+    # 或者使用舊版 docker-compose 語法：
+    # runtime: nvidia
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all

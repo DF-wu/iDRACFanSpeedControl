@@ -1,26 +1,54 @@
-# Dockerfile
-# Use Alpine  as the base image for its small size
-FROM alpine:latest
+# Dockerfile for iDRAC Fan Speed Control with GPU Support
+# 基於 NVIDIA 的 Ubuntu 基礎映像檔以支援 GPU 溫度監控
+# 如果不需要 GPU 支援，可以改用 alpine:latest
+FROM nvidia/cuda:11.8-base-ubuntu22.04
 
-# Install required packages (ipmitool, bash, bc for hex conversion)
-RUN apk add --no-cache openssh bash ipmitool bc sshpass
+# 設定維護者資訊
+LABEL maintainer="iDRAC Fan Control Service"
+LABEL description="Intelligent fan speed control for Dell servers based on disk and GPU temperatures"
 
-# Copy the fan control script into the container
-COPY src/FanControlWithEsxiSmart.sh /usr/FanControlWithEsxiSmart.sh
+# 設定環境變數以避免互動式安裝
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN chmod 755 /usr/FanControlWithEsxiSmart.sh
+# 安裝必要的套件
+# - openssh-client: SSH 客戶端，用於連線到 ESXi 主機
+# - bash: Bash shell，執行腳本所需
+# - ipmitool: IPMI 工具，用於控制 iDRAC 風扇
+# - bc: 基本計算器，用於十進位到十六進位轉換
+# - sshpass: 提供 SSH 密碼認證功能
+# - nvidia-utils-* 已包含在基礎映像檔中，提供 nvidia-smi
+RUN apt-get update && apt-get install -y \
+    openssh-client \
+    bash \
+    ipmitool \
+    bc \
+    sshpass \
+    && rm -rf /var/lib/apt/lists/*
 
+# 複製風扇控制腳本到容器內
+COPY src/FanControlWithEsxiSmart.sh /usr/local/bin/fan-control.sh
 
-# optional
-# Set the environment variables (you can override these during runtime)
-# ENV IDRAC_IP="REPLACE_TO_YOUR_IDRAC_IP"
-# ENV IDRAC_ID="REPLACE_TO_YOUR_IDRAC_ID"
-# ENV IDRAC_PASSWORD="REPLACE_TO_YOUR_IDRAC_PASSWORD"
-# ENV DRIVE_DEVICE="t10.NVMe____KCD61LUL7T68_________________________"
-# ENV OPERATION_MODE="auto"
+# 設定腳本執行權限
+RUN chmod +x /usr/local/bin/fan-control.sh
 
-# Set the working directory to /usr/local/bin
-WORKDIR /usr
+# 建立日誌目錄
+RUN mkdir -p /var/log/fan-control
 
-# Set the entrypoint to the fan control script
-ENTRYPOINT ["bash","/usr/FanControlWithEsxiSmart.sh"]
+# 設定工作目錄
+WORKDIR /var/log/fan-control
+
+# 環境變數說明 (可在執行時覆蓋)
+# IDRAC_IP: iDRAC 的 IP 位址
+# IDRAC_ID: iDRAC 登入帳號
+# IDRAC_PASSWORD: iDRAC 登入密碼
+# DRIVE_DEVICE: 要監控的磁碟設備 ID
+# OPERATION_MODE: 操作模式 (auto/manual)
+# WITH_GPU_TEMP: 是否啟用 GPU 溫度監控 (true/false)
+# CHECK_INTERVAL: 自動模式的檢查間隔 (秒)
+
+# 健康檢查 - 檢查腳本是否能正常執行
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -f fan-control.sh || exit 1
+
+# 設定進入點為風扇控制腳本
+ENTRYPOINT ["/usr/local/bin/fan-control.sh"]
