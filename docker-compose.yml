@@ -8,7 +8,7 @@ services:
       - .env  # 使用者可以將自己的 .env 文件掛載到此位置
     volumes:
       # 可選：掛載日誌目錄以保存風扇控制日誌
-      - ./logs:/app/logs
+      - ./logs:/var/log/fan-control
       # 可選：掛載自定義 .env 文件（取消註解以使用）
       # - /path/to/your/custom/.env:/app/.env:ro
     networks:

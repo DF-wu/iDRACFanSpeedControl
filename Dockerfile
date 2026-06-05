@@ -45,6 +45,8 @@ WORKDIR /var/log/fan-control
 # OPERATION_MODE: 操作模式 (auto/manual)
 # WITH_GPU_TEMP: 是否啟用 GPU 溫度監控 (true/false)
 # CHECK_INTERVAL: 自動模式的檢查間隔 (秒)
+# LOG_DIR: 日誌輸出目錄 (預設: /var/log/fan-control)
+ENV LOG_DIR=/var/log/fan-control
 
 # 健康檢查 - 檢查腳本是否能正常執行
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
