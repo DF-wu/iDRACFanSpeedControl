@@ -123,8 +123,18 @@ restore_auto_control() {
 # Function to validate configuration
 validate_config() {
     local error=0
-    
-    # Check required variables
+
+    # Validate operation mode first so mode-specific requirements cannot be bypassed
+    case "$OPERATION_MODE" in
+        "manual"|"auto")
+            ;;
+        *)
+            echo "Invalid operation mode: ${OPERATION_MODE} (must be 'auto' or 'manual')"
+            error=1
+            ;;
+    esac
+
+    # iDRAC credentials are required by both manual and auto modes
     if [[ "$IDRAC_IP" == "REPLACE_TO_YOUR_IDRAC_IP" ]]; then
         echo "Error: IDRAC_IP not configured"
         error=1
@@ -137,23 +147,37 @@ validate_config() {
         echo "Error: IDRAC_PASSWORD not configured"
         error=1
     fi
-    if [[ "$ESXI_HOST" == "REPLACE_TO_YOUR_ESXI_HOST" ]]; then
-        echo "Error: ESXI_HOST not configured"
-        error=1
-    fi
-    if [[ "$ESXI_USERNAME" == "REPLACE_TO_YOUR_ESXI_USERNAME" ]]; then
-        echo "Error: ESXI_USERNAME not configured"
-        error=1
-    fi
-    if [[ "$ESXI_PASSWORD" == "REPLACE_TO_YOUR_ESXI_PASSWORD" ]]; then
-        echo "Error: ESXI_PASSWORD not configured"
-        error=1
+
+    # ESXi is only used as the temperature source in auto mode
+    if [[ "$OPERATION_MODE" == "auto" ]]; then
+        if [[ "$ESXI_HOST" == "REPLACE_TO_YOUR_ESXI_HOST" ]]; then
+            echo "Error: ESXI_HOST not configured"
+            error=1
+        fi
+        if [[ "$ESXI_USERNAME" == "REPLACE_TO_YOUR_ESXI_USERNAME" ]]; then
+            echo "Error: ESXI_USERNAME not configured"
+            error=1
+        fi
+        if [[ "$ESXI_PASSWORD" == "REPLACE_TO_YOUR_ESXI_PASSWORD" ]]; then
+            echo "Error: ESXI_PASSWORD not configured"
+            error=1
+        fi
     fi
 
-    
-
-    
     if [ $error -eq 1 ]; then
+        exit 1
+    fi
+}
+
+# Function to prepare log output for automatic mode
+prepare_log_dir() {
+    if ! mkdir -p "$LOG_DIR"; then
+        echo "Error: failed to create LOG_DIR: ${LOG_DIR}"
+        exit 1
+    fi
+
+    if ! touch "${LOG_DIR}/fan_control.log"; then
+        echo "Error: failed to write log file: ${LOG_DIR}/fan_control.log"
         exit 1
     fi
 }
@@ -177,6 +201,8 @@ manual_mode() {
 # Function to run in automatic mode
 auto_mode() {
     echo "Automatic fan speed control mode"
+    prepare_log_dir
+
     if [[ "$WITH_GPU_TEMP" == "true" ]]; then
         echo "GPU temperature monitoring enabled - using decision temperature logic"
         echo "Decision Temperature = max(Disk Temperature, GPU Temperature - ${GPU_TEMP_OFFSET}°C)"
@@ -238,7 +264,7 @@ case $OPERATION_MODE in
         auto_mode
         ;;
     *)
-        echo "Invalid operation mode: ${OPERATION_MODE} (must be 'auto' or 'manual')"
+        # validate_config already reported the invalid mode.
         exit 1
         ;;
 esac
