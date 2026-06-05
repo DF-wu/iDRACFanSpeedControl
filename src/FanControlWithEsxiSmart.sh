@@ -40,6 +40,9 @@ GPU_TEMP_OFFSET=${GPU_TEMP_OFFSET:-15}
 ESXI_HOST=${ESXI_HOST:-"REPLACE_TO_YOUR_ESXI_HOST"}
 ESXI_USERNAME=${ESXI_USERNAME:-"REPLACE_TO_YOUR_ESXI_USERNAME"}
 ESXI_PASSWORD=${ESXI_PASSWORD:-"REPLACE_TO_YOUR_ESXI_PASSWORD"}
+
+# Log directory
+LOG_DIR=${LOG_DIR:-.}
  
 # Function to get current drive temperature from ESXi host
 get_drive_temp() {
@@ -134,6 +137,18 @@ validate_config() {
         echo "Error: IDRAC_PASSWORD not configured"
         error=1
     fi
+    if [[ "$ESXI_HOST" == "REPLACE_TO_YOUR_ESXI_HOST" ]]; then
+        echo "Error: ESXI_HOST not configured"
+        error=1
+    fi
+    if [[ "$ESXI_USERNAME" == "REPLACE_TO_YOUR_ESXI_USERNAME" ]]; then
+        echo "Error: ESXI_USERNAME not configured"
+        error=1
+    fi
+    if [[ "$ESXI_PASSWORD" == "REPLACE_TO_YOUR_ESXI_PASSWORD" ]]; then
+        echo "Error: ESXI_PASSWORD not configured"
+        error=1
+    fi
 
     
 
@@ -201,7 +216,7 @@ auto_mode() {
         fi
         
         # Log the status
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Temp: ${temp}°C, Fan: ${target_speed}%" >> fan_control.log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Temp: ${temp}°C, Fan: ${target_speed}%" >> "${LOG_DIR}/fan_control.log"
         
         sleep "$CHECK_INTERVAL"
     done

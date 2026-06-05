@@ -16,6 +16,19 @@
 - 📊 **Configurable Thresholds**: Customize temperature and fan speed settings
 - 🔄 **Auto/Manual Modes**: Flexible operation modes for different use cases
 
+## ⚠️ Known Limitations
+
+### ESXi Dependency for Temperature
+
+This project currently **requires an ESXi host with SSH enabled** to read NVMe disk temperatures. The temperature is retrieved by SSH'ing into ESXi and running `esxcli storage core device smart get` for a single NVMe drive. This means:
+
+- **No CPU or ambient temperature is monitored** — only one NVMe disk's SMART temperature is used. Server CPU, inlet, and exhaust sensors accessible via iDRAC IPMI are not utilized.
+- **If ESXi is unreachable**, the script silently falls back to `0°C`, causing fan speed to drop to `FAN_SPEED_LOW` (30%). This is **not fail-safe** — if the ESXi host becomes unresponsive while the server is under load, fans will run at minimum speed.
+- **Password-based SSH only** (`sshpass`). SSH key authentication is not supported.
+- **New SSH connection per check cycle** — each `CHECK_INTERVAL` (default 60s) opens a fresh connection, adding latency and auth log noise.
+
+**Planned improvements**: Decouple temperature from ESXi by supporting direct IPMI sensor reading, local SMART via `smartctl`/`nvme`, and adding a fail-safe fallback speed when temperature readings fail. See [TODO](#todo) below.
+
 ## 🚀 Quick Start
 
 ### Step 1: Setup Environment
@@ -263,6 +276,32 @@ TEMP_CRITICAL=85
 - 🔄 **Compatible**: All Dell PowerEdge servers with IPMI 2.0 support
 - 🎮 **GPU Support**: NVIDIA GPUs (requires NVIDIA Container Toolkit)
 
+## 📋 TODO / Roadmap
+
+### High Priority
+
+- [ ] **Decouple temperature from ESXi** — Add support for direct iDRAC IPMI sensor reading (`ipmitool sdr`) as primary or fallback temperature source. This would read CPU, inlet, and exhaust temperatures without needing ESXi SSH.
+- [ ] **Fail-safe fallback behavior** — When temperature reading fails (SSH timeout, ESXi unreachable), default to a configurable `TEMP_FAILSAFE_SPEED` (e.g., 60%) instead of silently dropping to `FAN_SPEED_LOW`.
+- [ ] **Add CPU temperature monitoring** — Read CPU/ambient/exhaust sensors via IPMI and include them in the decision temperature calculation.
+
+### Medium Priority
+
+- [ ] **SSH key authentication** — Support `ESXI_SSH_KEY` alongside password-based auth. Remove `sshpass` dependency when using keys.
+- [ ] **Connection retry + health check** — Validate ESXi connectivity at startup. Add retry with backoff on SSH failures.
+- [ ] **SSH connection reuse** — Use SSH `ControlMaster` to avoid opening a new connection every cycle.
+- [ ] **Temperature hysteresis** — Add configurable deadband (e.g., 3°C) to prevent fan speed oscillation at threshold boundaries.
+- [ ] **Fix log persistence** — Align Docker volume mount with script log path so logs survive container restarts.
+
+### Low Priority / Nice to Have
+
+- [ ] **Prometheus metrics endpoint** — Expose temperature and fan speed metrics for monitoring dashboards.
+- [ ] **Health endpoint / webhook alerting** — Notify on temperature threshold breaches or connection failures.
+- [ ] **Gradual fan ramping** — Smooth fan speed transitions instead of abrupt steps.
+- [ ] **Clean up dead code** — Remove `src/.env` and `src/setIdracFanSpeed.sh`, or consolidate with main config.
+- [ ] **Fix `imgaes/` directory typo** → `images/`.
+- [ ] **Version tagging** — Add semver tags to Docker images instead of only `:latest`.
+- [ ] **Tests** — Add basic smoke tests for temperature logic and IPMI command formatting.
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -280,7 +319,7 @@ Contributions are welcome! Please feel free to submit a Pull Request or open an 
 - **智慧溫度監控**：根據磁碟和 GPU 溫度自動調節風扇轉速
 - **Docker 部署**：使用 Docker Compose 一鍵部署
 - **環境變數控制**：所有設定都可以透過 .env 文件控制
-- **決策溫度算法**：`max(磁碟溫度, GPU溫度-20°C)` 確保最佳散熱效果
+- **決策溫度算法**：`max(磁碟溫度, GPU溫度-GPU_TEMP_OFFSET)`（預設偏移 15°C，可自訂）確保最佳散熱效果
 
 ### 快速使用
 
