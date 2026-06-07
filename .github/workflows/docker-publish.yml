@@ -1,43 +1,73 @@
-name: IdracFanControl Docker Build and Push to GHCR
+name: Build and publish Docker image
 
 on:
   push:
     branches:
-      - master  # Change this to your default branch if it's different
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-    # Step 1: Checkout the repository
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-    # Step 2: Log in to GitHub Container Registry
-    - name: Log in to GHCR
-      uses: docker/login-action@v2
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GH_TOKEN }}
+      - name: Run tests
+        run: make test
 
-    - name: Convert repository owner to lowercase
-      id: repo_owner_lowercase
-      run: echo "REPO_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      - name: Validate Compose file
+        run: |
+          cp .env.example .env
+          docker compose config >/tmp/compose.yml
 
-    - name: Log repository owner
-      run: echo "Repository owner in lowercase is $REPO_OWNER"
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    # Step 3: Build the Docker image
-    - name: Build Docker image
-      run: |
-        docker build -t ghcr.io/$REPO_OWNER/idrac-fan-control:latest .
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    # Step 4: Push the Docker image to GHCR
-    - name: Push Docker image
-      run: |
-        docker push ghcr.io/$REPO_OWNER/idrac-fan-control:latest
+      - name: Normalize image name
+        id: image
+        run: |
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${owner}/idrac-fan-control" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
