@@ -1,330 +1,411 @@
-# 🌡️ iDRAC Fan Speed Control
+# iDRAC Fan Speed Control
 
-[![Docker](https://img.shields.io/badge/Docker-Supported-blue?logo=docker)](https://hub.docker.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tested](https://img.shields.io/badge/Tested-Dell%20R730XD-success)](https://www.dell.com/)
+[![Docker image](https://img.shields.io/badge/GHCR-idrac--fan--control-blue)](https://github.com/DF-wu/iDRACFanSpeedControl/pkgs/container/idrac-fan-control)
+[![Tests](https://img.shields.io/badge/tests-make%20test-green)](#testing)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Intelligent fan speed control for Dell PowerEdge servers** with smart temperature monitoring and GPU support. Control your server fans through IPMI commands over LAN, tested on R730XD servers with iDRAC 8.
+Dell PowerEdge 伺服器風扇控制工具。它透過 iDRAC/IPMI raw command 設定風扇轉速，並可依 ESXi NVMe SMART、iDRAC temperature sensors、NVIDIA GPU 溫度自動調整。
 
-## ✨ Features
+> Safety first: 這個專案會覆寫 Dell 原廠風扇控制。設定錯誤可能讓硬體過熱。第一次使用請在旁監看溫度、保留 iDRAC Web UI 存取權，並確認 `restore` 指令可用。
 
-- 🧠 **Smart Temperature Monitoring**: Automatically adjusts fan speed based on NVMe disk temperatures
-- 🎮 **GPU Temperature Support**: Optional GPU temperature monitoring with NVIDIA Container Toolkit
-- ⚙️ **Environment Variable Control**: Complete configuration through `.env` files
-- 🐳 **Docker Deployment**: One-click deployment with no manual environment setup
-- 🔥 **Decision Temperature Algorithm**: `max(disk_temp, gpu_temp - GPU_TEMP_OFFSET)` ensures optimal cooling
-- 📊 **Configurable Thresholds**: Customize temperature and fan speed settings
-- 🔄 **Auto/Manual Modes**: Flexible operation modes for different use cases
+![iDRAC 8 IPMI over LAN setting](images/image.png)
 
-## ⚠️ Known Limitations
+## What It Does
 
-### ESXi Dependency for Auto Mode Temperature
+- `auto`: 持續讀取溫度，依 fan curve 設定風扇。
+- `once`: 執行一次溫度讀取與風扇調整後離開。
+- `manual`: 手動設定 1-100% 風扇 duty cycle。
+- `restore`: 將 iDRAC 還原為 Dell 自動風扇控制。
+- `status`: 印出 iDRAC chassis status 與 temperature sensors。
+- `validate`: 檢查本機設定是否足以啟動目前模式。
 
-In `OPERATION_MODE=auto`, this project currently **requires an ESXi host with SSH enabled** to read NVMe disk temperatures. `OPERATION_MODE=manual` only sends iDRAC/IPMI fan commands and does not require ESXi credentials. Auto-mode temperature is retrieved by SSH'ing into ESXi and running `esxcli storage core device smart get` for a single NVMe drive. This means:
+## Improvements In This Version
 
-- **No CPU or ambient temperature is monitored** — only one NVMe disk's SMART temperature is used. Server CPU, inlet, and exhaust sensors accessible via iDRAC IPMI are not utilized.
-- **If ESXi is unreachable**, the script silently falls back to `0°C`, causing fan speed to drop to `FAN_SPEED_LOW` (30%). This is **not fail-safe** — if the ESXi host becomes unresponsive while the server is under load, fans will run at minimum speed.
-- **Password-based SSH only** (`sshpass`). SSH key authentication is not supported.
-- **New SSH connection per check cycle** — each `CHECK_INTERVAL` (default 60s) opens a fresh connection, adding latency and auth log noise.
+- 溫度來源可選 `esxi`、`idrac`、`gpu`，也可混用。
+- 溫度讀取失敗時套用 `FAILSAFE_FAN_SPEED`，不再掉到最低風扇轉速。
+- 支援 hysteresis，避免溫度卡在閾值附近時風扇反覆跳速。
+- 支援 ESXi SSH password 或 key authentication。
+- IPMI 密碼改用 `IPMI_PASSWORD` environment 傳給 `ipmitool -E`，避免出現在 command line。
+- 舊手動腳本已改成 wrapper，共用同一份核心邏輯。
+- 新增 `make test`、Docker healthcheck、`.dockerignore`、`.gitignore`、MIT `LICENSE`。
 
-**Planned improvements**: Decouple temperature from ESXi by supporting direct IPMI sensor reading, local SMART via `smartctl`/`nvme`, and adding a fail-safe fallback speed when temperature readings fail. See [TODO](#todo) below.
+## Requirements
 
-## 🚀 Quick Start
+| Requirement | Why |
+| --- | --- |
+| Dell PowerEdge with iDRAC | 送出 IPMI fan raw commands |
+| iDRAC IPMI over LAN enabled | `ipmitool -I lanplus` 需要 LAN access |
+| Docker / Docker Compose | 建議部署方式 |
+| ESXi SSH access | 只有 `TEMPERATURE_SOURCES` 包含 `esxi` 時需要 |
+| NVIDIA Container Toolkit | 只有 `gpu` 溫度來源需要 |
 
-### Step 1: Setup Environment
+Tested target: Dell PowerEdge R730xd/R730XD class servers with iDRAC 8. Other Dell models may support the same OEM raw commands, but you should test with `manual` and `restore` before running unattended.
 
-Clone the repository and copy the example configuration:
+## Quick Start
+
+1. Clone the repository.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/DF-wu/iDRACFanSpeedControl.git
 cd iDRACFanSpeedControl
+```
+
+2. Create a private environment file.
+
+```bash
 cp .env.example .env
+chmod 600 .env
 ```
 
-Edit the `.env` file with your iDRAC connection details. ESXi connection details are required when using `OPERATION_MODE=auto`:
+3. Edit `.env`.
 
-```bash
-# iDRAC Configuration
-IDRAC_IP=192.168.1.100
-IDRAC_ID=root  
-IDRAC_PASSWORD=calvin
+Minimum iDRAC-only auto mode:
 
-# ESXi Configuration (required for auto mode disk temperature)
-ESXI_HOST=192.168.1.10
+```env
+IDRAC_IP=192.0.2.10
+IDRAC_ID=root
+IDRAC_PASSWORD=change-me
+OPERATION_MODE=auto
+TEMPERATURE_SOURCES=idrac
+```
+
+ESXi NVMe SMART mode:
+
+```env
+TEMPERATURE_SOURCES=esxi
+ESXI_HOST=192.0.2.20
 ESXI_USERNAME=root
-ESXI_PASSWORD=your_esxi_password
-
-# Drive Identifier
-DRIVE_DEVICE=t10.NVMe____KCD61LUL7T68____________________________015E8306E28EE38C
-
-# GPU Temperature Monitoring (Optional)
-WITH_GPU_TEMP=false  # Set to true to enable GPU temperature monitoring
+ESXI_PASSWORD=change-me
+DRIVE_DEVICE=t10.NVMe____replace_with_your_device_identifier
 ```
 
-### Step 2: Deploy the Service
-
-Deploy using Docker Compose:
+4. Validate and start.
 
 ```bash
-docker-compose up -d
+docker compose run --rm idrac-fan-control validate
+docker compose up -d
+docker logs -f idrac-fan-control
 ```
 
-### Step 3: Enable GPU Temperature Monitoring (Optional)
-
-To enable GPU temperature monitoring:
-
-1. Set `WITH_GPU_TEMP=true` in your `.env` file
-2. Uncomment the GPU configuration in `docker-compose.yml`:
-
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all
-          capabilities: [gpu]
-```
-
-## ⚙️ Configuration
-
-### Temperature Thresholds
+5. Restore Dell automatic control when needed.
 
 ```bash
-TEMP_LOW=65        # Low temperature threshold (°C)
-TEMP_MEDIUM=70     # Medium temperature threshold (°C)  
-TEMP_HIGH=75       # High temperature threshold (°C)
-TEMP_CRITICAL=80   # Critical temperature threshold (°C)
+docker compose run --rm idrac-fan-control restore
 ```
 
-### Fan Speed Settings
+## Commands
+
+Docker Compose passes extra arguments to the container entrypoint:
 
 ```bash
-FAN_SPEED_LOW=30      # Fan speed for low temperature (%)
-FAN_SPEED_MEDIUM=40   # Fan speed for medium temperature (%)
-FAN_SPEED_HIGH=50     # Fan speed for high temperature (%)
-FAN_SPEED_CRITICAL=60 # Fan speed for critical temperature (%)
+# Run continuously according to OPERATION_MODE=auto
+docker compose up -d
+
+# Run one automatic cycle
+docker compose run --rm idrac-fan-control once
+
+# Set manual fan speed to 35%
+docker compose run --rm idrac-fan-control manual 35
+
+# Restore Dell automatic fan control
+docker compose run --rm idrac-fan-control restore
+
+# Print chassis and temperature sensor status
+docker compose run --rm idrac-fan-control status
+
+# Validate config without touching fan speed
+docker compose run --rm idrac-fan-control validate
 ```
 
-### Operation Modes
+Local script usage is the same:
 
 ```bash
-OPERATION_MODE=auto   # auto: Automatic mode | manual: Manual mode
-CHECK_INTERVAL=60     # Check interval in seconds (auto mode only)
+src/FanControlWithEsxiSmart.sh manual 35
+src/FanControlWithEsxiSmart.sh restore
 ```
 
-## 🧮 Decision Temperature Algorithm
+## Temperature Sources
 
-When GPU temperature monitoring is enabled, the system uses this algorithm to calculate the decision temperature:
+`TEMPERATURE_SOURCES` accepts comma-separated values.
+
+| Source | Reads | Requires |
+| --- | --- | --- |
+| `esxi` | One NVMe drive's SMART temperature through `esxcli` | ESXi SSH, `DRIVE_DEVICE` |
+| `idrac` | iDRAC temperature sensors from `ipmitool sdr type Temperature` | iDRAC credentials |
+| `gpu` | NVIDIA GPU temperature from `nvidia-smi` | NVIDIA Container Toolkit |
+
+Hybrid mode uses the highest decision temperature:
 
 ```text
-Decision Temperature = max(Disk Temperature, GPU Temperature - GPU_TEMP_OFFSET)
+decision_temperature = max(esxi_temp, idrac_sensor_temps..., gpu_temp - GPU_TEMP_OFFSET)
 ```
 
-This algorithm ensures:
+Examples:
 
-- **Proactive GPU cooling**: High GPU temperatures trigger increased fan speeds
-- **Configurable offset compensation**: Adjustable offset (`GPU_TEMP_OFFSET`) accounts for thermal differences between GPU and system
-- **Disk temperature baseline**: Disk temperature always serves as the minimum baseline
+```env
+# No ESXi dependency. Use iDRAC sensors only.
+TEMPERATURE_SOURCES=idrac
 
-### Algorithm Examples
+# NVMe SMART plus iDRAC ambient/CPU sensors.
+TEMPERATURE_SOURCES=esxi,idrac
 
-With default `GPU_TEMP_OFFSET=15°C`:
+# NVMe SMART plus GPU compensation.
+TEMPERATURE_SOURCES=esxi,gpu
+GPU_TEMP_OFFSET=15
 
-| Disk Temp | GPU Temp | GPU-15 | Decision Temp | Reasoning |
-|-----------|----------|--------|---------------|-----------|
-| 65°C | 70°C | 55°C | **65°C** | Disk temperature is higher |
-| 65°C | 85°C | 70°C | **70°C** | GPU-15 is higher, use adjusted GPU temp |
-| 75°C | 80°C | 65°C | **75°C** | Disk temperature remains baseline |
+# Backward-compatible switch. This appends gpu to TEMPERATURE_SOURCES.
+WITH_GPU_TEMP=true
+```
 
-## 🔧 Troubleshooting
+## Fan Curve
 
-### Common Issues
+The controller maps the decision temperature to a fan level.
 
-#### GPU Temperature Reading Fails
+| Level | Temperature range | Default speed |
+| --- | --- | --- |
+| `idle` | `< TEMP_LOW` | `FAN_SPEED_IDLE=25` |
+| `low` | `TEMP_LOW` to `< TEMP_MEDIUM` | `FAN_SPEED_LOW=30` |
+| `medium` | `TEMP_MEDIUM` to `< TEMP_HIGH` | `FAN_SPEED_MEDIUM=40` |
+| `high` | `TEMP_HIGH` to `< TEMP_CRITICAL` | `FAN_SPEED_HIGH=50` |
+| `critical` | `>= TEMP_CRITICAL` | `FAN_SPEED_CRITICAL=60` |
+| `failsafe` | all temperature sources failed | `FAILSAFE_FAN_SPEED=70` |
+
+Default thresholds:
+
+```env
+TEMP_LOW=65
+TEMP_MEDIUM=70
+TEMP_HIGH=75
+TEMP_CRITICAL=80
+HYSTERESIS=2
+```
+
+Hysteresis only delays downshifts. For example, if the current level is `high` and `TEMP_HIGH=75`, the controller keeps `high` until the temperature falls to `73C` or lower when `HYSTERESIS=2`.
+
+## Configuration Reference
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `IDRAC_IP` | empty | Required for all fan commands |
+| `IDRAC_ID` | `root` | iDRAC username |
+| `IDRAC_PASSWORD` | empty | iDRAC password |
+| `IPMI_INTERFACE` | `lanplus` | Usually keep this value |
+| `IPMI_TIMEOUT` | `5` | Seconds per IPMI attempt |
+| `IPMI_RETRIES` | `2` | IPMI retry count |
+| `OPERATION_MODE` | `manual` | `auto`, `once`, or `manual` |
+| `TEMPERATURE_SOURCES` | `esxi` | Comma-separated: `esxi,idrac,gpu` |
+| `WITH_GPU_TEMP` | `false` | Backward-compatible GPU switch |
+| `GPU_TEMP_OFFSET` | `15` | Subtracted from GPU temperature |
+| `CHECK_INTERVAL` | `60` | Seconds between auto cycles |
+| `COMMAND_TIMEOUT` | `20` | Wrapper timeout for SSH, IPMI, and GPU reads |
+| `ESXI_HOST` | empty | Required when source includes `esxi` |
+| `ESXI_USERNAME` | `root` | ESXi SSH username |
+| `ESXI_PASSWORD` | empty | Use password auth when `ESXI_SSH_KEY` is empty |
+| `ESXI_SSH_KEY` | empty | Optional SSH private key path |
+| `ESXI_SSH_PORT` | `22` | ESXi SSH port |
+| `SSH_CONNECT_TIMEOUT` | `10` | SSH connection timeout |
+| `DRIVE_DEVICE` | empty | ESXi NVMe device identifier |
+| `TEMP_LOW` | `65` | Idle to low threshold |
+| `TEMP_MEDIUM` | `70` | Low to medium threshold |
+| `TEMP_HIGH` | `75` | Medium to high threshold |
+| `TEMP_CRITICAL` | `80` | High to critical threshold |
+| `FAN_SPEED_IDLE` | `25` | Fan speed below `TEMP_LOW` |
+| `FAN_SPEED_LOW` | `30` | Fan speed at low level |
+| `FAN_SPEED_MEDIUM` | `40` | Fan speed at medium level |
+| `FAN_SPEED_HIGH` | `50` | Fan speed at high level |
+| `FAN_SPEED_CRITICAL` | `60` | Fan speed at critical level |
+| `HYSTERESIS` | `2` | Degrees C before downshift |
+| `FAILSAFE_ON_ERROR` | `true` | Apply fail-safe when all sources fail |
+| `FAILSAFE_FAN_SPEED` | `70` | Conservative speed for sensor failure |
+| `RESTORE_AUTO_ON_EXIT` | `true` | Restore Dell auto control when auto mode exits |
+| `MANUAL_FAN_SPEED` | empty | Used by `manual` mode without an argument |
+| `LOG_DIR` | `/var/log/fan-control` | Set empty only for tests |
+| `LOG_FILE` | `fan_control.log` | Status log file name |
+| `DRY_RUN` | `false` | Log commands without running `ipmitool` |
+
+## Getting The ESXi Drive Identifier
+
+SSH to the ESXi host and list storage devices:
 
 ```bash
-# Check if NVIDIA GPU is available
-nvidia-smi
+ssh root@192.0.2.20
+esxcli storage core device list
+```
 
-# Verify Docker GPU support
+Find the NVMe device ID and test SMART temperature output:
+
+```bash
+esxcli storage core device smart get -d t10.NVMe____replace_with_your_device_identifier
+```
+
+Use that full ID as `DRIVE_DEVICE`.
+
+## GPU Mode
+
+Install NVIDIA Container Toolkit on the Docker host, then enable GPU access in `docker-compose.yml`:
+
+```yaml
+gpus: all
+```
+
+Set one of these in `.env`:
+
+```env
+TEMPERATURE_SOURCES=esxi,gpu
+# or
+WITH_GPU_TEMP=true
+```
+
+Verify GPU access:
+
+```bash
 docker run --rm --gpus all nvidia/cuda:12.9.0-runtime-ubuntu24.04 nvidia-smi
+docker compose run --rm idrac-fan-control status
 ```
 
-#### Cannot Connect to ESXi Host
+## Logs
+
+Container logs show control decisions:
 
 ```bash
-# Test SSH connection
-ssh root@your_esxi_host
-
-# Note: ESXi SSH service must be enabled
+docker logs -f idrac-fan-control
 ```
 
-#### iDRAC Connection Failed
+Persistent fan-control logs are written to `./logs/fan_control.log` by the Compose volume:
 
 ```bash
-# Test iDRAC connection
-ipmitool -I lanplus -H your_idrac_ip -U root -P calvin chassis status
+tail -f logs/fan_control.log
 ```
 
-### Monitoring and Logs
+Each line includes `status`, `temp`, `level`, `fan`, and source details.
+
+## Testing
+
+Run local tests:
 
 ```bash
-# View container logs
-docker logs idrac-fan-control
-
-# View fan control records
-docker exec idrac-fan-control tail -f /var/log/fan-control/fan_control.log
+make test
 ```
 
-## 📋 Environment Variables Reference
+The tests cover:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `IDRAC_IP` | - | iDRAC IP address |
-| `IDRAC_ID` | root | iDRAC username |
-| `IDRAC_PASSWORD` | - | iDRAC password |
-| `ESXI_HOST` | - | ESXi host IP (required for `OPERATION_MODE=auto`) |
-| `ESXI_USERNAME` | root | ESXi username (required for `OPERATION_MODE=auto`) |
-| `ESXI_PASSWORD` | - | ESXi password (required for `OPERATION_MODE=auto`) |
-| `DRIVE_DEVICE` | - | Disk identifier to monitor |
-| `TEMP_LOW` | 65 | Low temperature threshold (°C) |
-| `TEMP_MEDIUM` | 70 | Medium temperature threshold (°C) |
-| `TEMP_HIGH` | 75 | High temperature threshold (°C) |
-| `TEMP_CRITICAL` | 80 | Critical temperature threshold (°C) |
-| `FAN_SPEED_LOW` | 30 | Low temperature fan speed (%) |
-| `FAN_SPEED_MEDIUM` | 40 | Medium temperature fan speed (%) |
-| `FAN_SPEED_HIGH` | 50 | High temperature fan speed (%) |
-| `FAN_SPEED_CRITICAL` | 60 | Critical temperature fan speed (%) |
-| `OPERATION_MODE` | manual | Operation mode (auto/manual) |
-| `CHECK_INTERVAL` | 60 | Check interval in seconds |
-| `WITH_GPU_TEMP` | false | Enable GPU temperature monitoring |
-| `GPU_TEMP_OFFSET` | 15 | GPU temperature offset for decision algorithm (°C) |
+- Bash syntax checks.
+- Temperature source normalization.
+- iDRAC sensor parsing.
+- GPU offset decision logic.
+- Fan curve and hysteresis behavior.
+- Fail-safe behavior when every source fails.
+- Validation for iDRAC-only auto mode.
 
-## 🐳 Docker Compose Examples
-
-### Basic Configuration (Disk Temperature Only)
-
-```yaml
-version: '3.8'
-services:
-  idrac-fan-control:
-    container_name: idrac-fan-control
-    image: ghcr.io/df-wu/idrac-fan-control:latest
-    env_file:
-      - .env
-    volumes:
-      - ./logs:/var/log/fan-control
-    network_mode: host
-    restart: always
-```
-
-### GPU-Enabled Configuration
-
-```yaml
-version: '3.8'
-services:
-  idrac-fan-control:
-    container_name: idrac-fan-control
-    image: ghcr.io/df-wu/idrac-fan-control:latest
-    env_file:
-      - .env
-    volumes:
-      - ./logs:/var/log/fan-control
-    network_mode: host
-    restart: always
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-```
-
-## 🔍 Performance Tuning
-
-### Adjusting Check Intervals
+Run a dry validation target:
 
 ```bash
-# Reduce system load (slower response)
-CHECK_INTERVAL=120  # Check every 2 minutes
-
-# Increase responsiveness (higher system load)
-CHECK_INTERVAL=30   # Check every 30 seconds
+make validate
 ```
 
-### Custom Temperature Profiles
+Build a local image:
 
 ```bash
-# Conservative Profile (fans start early, quieter operation)
-TEMP_LOW=60
-TEMP_MEDIUM=65
-TEMP_HIGH=70
-TEMP_CRITICAL=75
+make docker-build
+```
 
-# Aggressive Profile (fans start later, potentially noisier but more efficient)
+If you do not need GPU support, build with a smaller Ubuntu base:
+
+```bash
+docker build --build-arg BASE_IMAGE=ubuntu:24.04 -t idrac-fan-control:local .
+```
+
+## Troubleshooting
+
+### `validate` says iDRAC config is missing
+
+Set `IDRAC_IP`, `IDRAC_ID`, and `IDRAC_PASSWORD` in `.env`. Also confirm IPMI over LAN is enabled in iDRAC.
+
+```bash
+ipmitool -I lanplus -H "$IDRAC_IP" -U "$IDRAC_ID" -P "$IDRAC_PASSWORD" chassis status
+```
+
+### Auto mode fails because ESXi is missing
+
+If you do not want ESXi SSH, use iDRAC sensors:
+
+```env
+TEMPERATURE_SOURCES=idrac
+```
+
+If you want ESXi SMART temperature, set `ESXI_HOST`, `ESXI_USERNAME`, `ESXI_PASSWORD` or `ESXI_SSH_KEY`, and `DRIVE_DEVICE`.
+
+### Temperature reads fail and fans jump to fail-safe
+
+That is intentional. The controller uses `FAILSAFE_FAN_SPEED` when no temperature source succeeds. Check the source-specific logs, then test each dependency:
+
+```bash
+docker compose run --rm idrac-fan-control status
+ssh root@your-esxi-host
+nvidia-smi
+```
+
+### Manual mode works, but auto mode is too noisy
+
+Raise the fan curve or add hysteresis:
+
+```env
 TEMP_LOW=70
 TEMP_MEDIUM=75
 TEMP_HIGH=80
 TEMP_CRITICAL=85
+HYSTERESIS=3
 ```
 
-## 💻 Supported Hardware
+### Restore automatic control
 
-- ✅ **Tested**: Dell PowerEdge R730XD (iDRAC 8)
-- 🔄 **Compatible**: All Dell PowerEdge servers with IPMI 2.0 support
-- 🎮 **GPU Support**: NVIDIA GPUs (requires NVIDIA Container Toolkit)
+Run:
 
-## 📋 TODO / Roadmap
+```bash
+docker compose run --rm idrac-fan-control restore
+```
 
-### High Priority
+This sends:
 
-- [ ] **Decouple temperature from ESXi** — Add support for direct iDRAC IPMI sensor reading (`ipmitool sdr`) as primary or fallback temperature source. This would read CPU, inlet, and exhaust temperatures without needing ESXi SSH.
-- [ ] **Fail-safe fallback behavior** — When temperature reading fails (SSH timeout, ESXi unreachable), default to a configurable `TEMP_FAILSAFE_SPEED` (e.g., 60%) instead of silently dropping to `FAN_SPEED_LOW`.
-- [ ] **Add CPU temperature monitoring** — Read CPU/ambient/exhaust sensors via IPMI and include them in the decision temperature calculation.
+```text
+raw 0x30 0x30 0x01 0x01
+```
 
-### Medium Priority
+## Security Notes
 
-- [ ] **SSH key authentication** — Support `ESXI_SSH_KEY` alongside password-based auth. Remove `sshpass` dependency when using keys.
-- [ ] **Connection retry + health check** — Validate ESXi connectivity at startup. Add retry with backoff on SSH failures.
-- [ ] **SSH connection reuse** — Use SSH `ControlMaster` to avoid opening a new connection every cycle.
-- [ ] **Temperature hysteresis** — Add configurable deadband (e.g., 3°C) to prevent fan speed oscillation at threshold boundaries.
-- [ ] **Log rotation** — Add log rotation or size limits for long-running deployments.
+- Keep `.env` private. This repository now ignores `.env`; if your clone still tracks it, run `git rm --cached .env`.
+- Prefer a dedicated iDRAC account if your iDRAC version supports suitable privileges.
+- Keep iDRAC and ESXi on a management network, not a public network.
+- Prefer `ESXI_SSH_KEY` over password auth when possible.
+- Review logs after every fan curve change.
 
-### Low Priority / Nice to Have
+## Repository Layout
 
-- [ ] **Prometheus metrics endpoint** — Expose temperature and fan speed metrics for monitoring dashboards.
-- [ ] **Health endpoint / webhook alerting** — Notify on temperature threshold breaches or connection failures.
-- [ ] **Gradual fan ramping** — Smooth fan speed transitions instead of abrupt steps.
-- [ ] **Clean up dead code** — Remove `src/.env` and `src/setIdracFanSpeed.sh`, or consolidate with main config.
-- [ ] **Fix `imgaes/` directory typo** → `images/`.
-- [ ] **Version tagging** — Add semver tags to Docker images instead of only `:latest`.
-- [ ] **Tests** — Add basic smoke tests for temperature logic and IPMI command formatting.
+```text
+.
+├── src/
+│   ├── FanControlWithEsxiSmart.sh   # main entrypoint
+│   └── setIdracFanSpeed.sh          # backward-compatible manual wrapper
+├── tests/
+│   └── fan-control.test.sh          # shell tests with mocked behavior
+├── images/
+│   └── image.png                    # iDRAC IPMI over LAN screenshot
+├── .env.example                     # documented configuration template
+├── docker-compose.yml
+├── Dockerfile
+├── Makefile
+└── README.md
+```
 
-## 📄 License
+## Roadmap
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- Add structured metrics output for Prometheus or node exporters.
+- Add optional fan ramping for smoother transitions.
+- Add log rotation examples for long-running hosts.
+- Add model-specific notes for more Dell PowerEdge generations.
 
-## 🤝 Contributing
+## License
 
-Contributions are welcome! Please feel free to submit a Pull Request or open an Issue for bugs and feature requests.
+MIT. See [LICENSE](LICENSE).
 
----
-
-## 🇹🇼 中文說明
-
-這是一個 Dell PowerEdge 伺服器的智慧風扇控制工具，主要功能包括：
-
-- **智慧溫度監控**：根據磁碟和 GPU 溫度自動調節風扇轉速
-- **Docker 部署**：使用 Docker Compose 一鍵部署
-- **環境變數控制**：所有設定都可以透過 .env 文件控制
-- **決策溫度算法**：`max(磁碟溫度, GPU溫度-GPU_TEMP_OFFSET)`（預設偏移 15°C，可自訂）確保最佳散熱效果
-
-### 快速使用
-
-1. 複製 `.env.example` 為 `.env` 並修改設定
-2. 執行 `docker-compose up -d` 啟動服務
-3. 如需 GPU 支援，請設定 `WITH_GPU_TEMP=true` 並開啟 Docker Compose 中的 GPU 配置
-
-已在 Dell R730XD (iDRAC 8) 上測試通過。
+Last reviewed: 2026-06-08.

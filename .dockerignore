@@ -1,0 +1,17 @@
+.git
+.github
+.sisyphus
+
+.env
+.env.*
+!.env.example
+
+logs
+tests
+README.md
+USAGE_GUIDE.md
+images
+
+*.log
+.DS_Store
+Thumbs.db
