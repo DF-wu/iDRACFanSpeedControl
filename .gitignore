@@ -3,7 +3,11 @@
 !.env.example
 
 logs/
+secrets/
 *.log
+*.env.backup*
+*-after-incident.txt
+diagnose-*.txt
 
 .DS_Store
 Thumbs.db
