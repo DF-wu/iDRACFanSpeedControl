@@ -6,6 +6,8 @@ services:
       - .env
     volumes:
       - ./logs:/var/log/fan-control
+      # Put an ESXi private key in ./secrets and use /run/secrets/<name> in .env.
+      - ./secrets:/run/secrets:ro
     network_mode: host
     restart: unless-stopped
     init: true

@@ -50,6 +50,8 @@ PROGRAM_NAME="$(basename "$0")"
 
 : "${LOG_DIR:=/var/log/fan-control}"
 : "${LOG_FILE:=fan_control.log}"
+: "${LOG_LEVEL:=INFO}"
+: "${HEALTHCHECK_MAX_AGE:=0}"
 : "${DRY_RUN:=false}"
 
 LAST_LEVEL=""
@@ -66,7 +68,9 @@ Usage:
   ${PROGRAM_NAME} restore              Return iDRAC to automatic fan control
   ${PROGRAM_NAME} status               Print iDRAC chassis and temperature status
   ${PROGRAM_NAME} validate             Validate local configuration
-  ${PROGRAM_NAME} healthcheck          Validate configuration for Docker health checks
+  ${PROGRAM_NAME} config               Print the effective configuration (secrets redacted)
+  ${PROGRAM_NAME} diagnose             Probe every configured dependency without changing fans
+  ${PROGRAM_NAME} healthcheck          Check config and automatic control loop freshness
 
 The command defaults to OPERATION_MODE when no argument is supplied.
 EOF
@@ -76,10 +80,42 @@ timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
 }
 
+log_level_rank() {
+    case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
+        DEBUG) printf '10' ;;
+        INFO) printf '20' ;;
+        WARN) printf '30' ;;
+        ERROR) printf '40' ;;
+        *) printf '20' ;;
+    esac
+}
+
 log() {
     local level="$1"
     shift
+
+    if (( $(log_level_rank "$level") < $(log_level_rank "$LOG_LEVEL") )); then
+        return 0
+    fi
+
     printf '%s [%s] %s\n' "$(timestamp)" "$level" "$*" >&2
+}
+
+compact_error() {
+    local value="${1:-}"
+    value="${value//$'\r'/ }"
+    value="${value//$'\n'/ }"
+    value="${value//$'\t'/ }"
+    value="$(trim "$value")"
+    printf '%.400s' "$value"
+}
+
+sanitize_log_field() {
+    local value="${1:-}"
+    value="${value//$'\r'/ }"
+    value="${value//$'\n'/ }"
+    value="${value//\"/\'}"
+    printf '%s' "$value"
 }
 
 trim() {
@@ -120,6 +156,10 @@ is_placeholder_value() {
 
     case "$value" in
         REPLACE_TO_YOUR_*|replace_with_*|your_*|change-me|changeme|t10.NVMe____replace*)
+            return 0
+            ;;
+        192.0.2.*|198.51.100.*|203.0.113.*)
+            # RFC 5737 documentation networks must never be used for a live target.
             return 0
             ;;
         *)
@@ -196,16 +236,27 @@ source_enabled_in_list() {
 
 command_needs_ipmi() {
     case "$1" in
-        auto|once|manual|restore|status) return 0 ;;
+        auto|once|manual|restore|status|diagnose) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 command_needs_temperature() {
     case "$1" in
-        auto|once) return 0 ;;
+        auto|once|diagnose) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+validate_awk_regex() {
+    local name="$1"
+    local regex="$2"
+
+    [[ -z "$regex" ]] && return 0
+    if ! awk -v regex="$regex" 'BEGIN { exit !("probe" ~ regex || "probe" !~ regex) }' </dev/null 2>/dev/null; then
+        log "ERROR" "${name} is not a valid awk regular expression"
+        return 1
+    fi
 }
 
 validate_sources() {
@@ -240,7 +291,7 @@ validate_config() {
     local sources
 
     case "$command" in
-        auto|once|manual|restore|status|validate|healthcheck) ;;
+        auto|once|manual|restore|status|validate|config|diagnose|healthcheck) ;;
         help|-h|--help) return 0 ;;
         *)
             log "ERROR" "Invalid command or OPERATION_MODE: ${command}"
@@ -248,35 +299,80 @@ validate_config() {
             ;;
     esac
 
-    for bool_name in WITH_GPU_TEMP FAILSAFE_ON_ERROR RESTORE_AUTO_ON_EXIT DRY_RUN; do
-        if ! is_bool "${!bool_name}"; then
-            log "ERROR" "${bool_name} must be a boolean value"
-            error=1
-        fi
-    done
-
-    validate_integer_range "TEMP_LOW" "$TEMP_LOW" 0 120 || error=1
-    validate_integer_range "TEMP_MEDIUM" "$TEMP_MEDIUM" 0 120 || error=1
-    validate_integer_range "TEMP_HIGH" "$TEMP_HIGH" 0 120 || error=1
-    validate_integer_range "TEMP_CRITICAL" "$TEMP_CRITICAL" 0 120 || error=1
-    validate_integer_range "FAN_SPEED_IDLE" "$FAN_SPEED_IDLE" 1 100 || error=1
-    validate_integer_range "FAN_SPEED_LOW" "$FAN_SPEED_LOW" 1 100 || error=1
-    validate_integer_range "FAN_SPEED_MEDIUM" "$FAN_SPEED_MEDIUM" 1 100 || error=1
-    validate_integer_range "FAN_SPEED_HIGH" "$FAN_SPEED_HIGH" 1 100 || error=1
-    validate_integer_range "FAN_SPEED_CRITICAL" "$FAN_SPEED_CRITICAL" 1 100 || error=1
-    validate_integer_range "FAILSAFE_FAN_SPEED" "$FAILSAFE_FAN_SPEED" 1 100 || error=1
-    validate_integer_range "CHECK_INTERVAL" "$CHECK_INTERVAL" 1 86400 || error=1
+    if ! is_bool "$DRY_RUN"; then
+        log "ERROR" "DRY_RUN must be a boolean value"
+        error=1
+    fi
     validate_integer_range "COMMAND_TIMEOUT" "$COMMAND_TIMEOUT" 1 300 || error=1
-    validate_integer_range "SSH_CONNECT_TIMEOUT" "$SSH_CONNECT_TIMEOUT" 1 300 || error=1
     validate_integer_range "IPMI_TIMEOUT" "$IPMI_TIMEOUT" 1 60 || error=1
     validate_integer_range "IPMI_RETRIES" "$IPMI_RETRIES" 0 20 || error=1
-    validate_integer_range "GPU_TEMP_OFFSET" "$GPU_TEMP_OFFSET" 0 120 || error=1
-    validate_integer_range "HYSTERESIS" "$HYSTERESIS" 0 30 || error=1
 
-    if is_integer "$TEMP_LOW" && is_integer "$TEMP_MEDIUM" && is_integer "$TEMP_HIGH" && is_integer "$TEMP_CRITICAL"; then
-        if (( TEMP_LOW >= TEMP_MEDIUM || TEMP_MEDIUM >= TEMP_HIGH || TEMP_HIGH >= TEMP_CRITICAL )); then
-            log "ERROR" "Temperature thresholds must increase: TEMP_LOW < TEMP_MEDIUM < TEMP_HIGH < TEMP_CRITICAL"
-            error=1
+    if [[ "$command" == "manual" && -n "$MANUAL_FAN_SPEED" ]]; then
+        validate_integer_range "MANUAL_FAN_SPEED" "$MANUAL_FAN_SPEED" 1 100 || error=1
+    fi
+
+    if command_needs_temperature "$command"; then
+        for bool_name in WITH_GPU_TEMP FAILSAFE_ON_ERROR RESTORE_AUTO_ON_EXIT; do
+            if ! is_bool "${!bool_name}"; then
+                log "ERROR" "${bool_name} must be a boolean value"
+                error=1
+            fi
+        done
+
+        validate_integer_range "TEMP_LOW" "$TEMP_LOW" 0 120 || error=1
+        validate_integer_range "TEMP_MEDIUM" "$TEMP_MEDIUM" 0 120 || error=1
+        validate_integer_range "TEMP_HIGH" "$TEMP_HIGH" 0 120 || error=1
+        validate_integer_range "TEMP_CRITICAL" "$TEMP_CRITICAL" 0 120 || error=1
+        validate_integer_range "FAN_SPEED_IDLE" "$FAN_SPEED_IDLE" 1 100 || error=1
+        validate_integer_range "FAN_SPEED_LOW" "$FAN_SPEED_LOW" 1 100 || error=1
+        validate_integer_range "FAN_SPEED_MEDIUM" "$FAN_SPEED_MEDIUM" 1 100 || error=1
+        validate_integer_range "FAN_SPEED_HIGH" "$FAN_SPEED_HIGH" 1 100 || error=1
+        validate_integer_range "FAN_SPEED_CRITICAL" "$FAN_SPEED_CRITICAL" 1 100 || error=1
+        validate_integer_range "FAILSAFE_FAN_SPEED" "$FAILSAFE_FAN_SPEED" 1 100 || error=1
+        validate_integer_range "CHECK_INTERVAL" "$CHECK_INTERVAL" 1 86400 || error=1
+        validate_integer_range "SSH_CONNECT_TIMEOUT" "$SSH_CONNECT_TIMEOUT" 1 300 || error=1
+        validate_integer_range "ESXI_SSH_PORT" "$ESXI_SSH_PORT" 1 65535 || error=1
+        validate_integer_range "GPU_TEMP_OFFSET" "$GPU_TEMP_OFFSET" 0 120 || error=1
+        validate_integer_range "HYSTERESIS" "$HYSTERESIS" 0 30 || error=1
+        validate_integer_range "HEALTHCHECK_MAX_AGE" "$HEALTHCHECK_MAX_AGE" 0 86400 || error=1
+
+        case "$(printf '%s' "$LOG_LEVEL" | tr '[:lower:]' '[:upper:]')" in
+            DEBUG|INFO|WARN|ERROR) ;;
+            *)
+                log "ERROR" "LOG_LEVEL must be DEBUG, INFO, WARN, or ERROR"
+                error=1
+                ;;
+        esac
+
+        case "$(printf '%s' "$SSH_STRICT_HOST_KEY_CHECKING" | tr '[:upper:]' '[:lower:]')" in
+            yes|no|ask|accept-new) ;;
+            *)
+                log "ERROR" "SSH_STRICT_HOST_KEY_CHECKING must be yes, no, ask, or accept-new"
+                error=1
+                ;;
+        esac
+
+        validate_awk_regex "IDRAC_SENSOR_INCLUDE_REGEX" "$IDRAC_SENSOR_INCLUDE_REGEX" || error=1
+        validate_awk_regex "IDRAC_SENSOR_EXCLUDE_REGEX" "$IDRAC_SENSOR_EXCLUDE_REGEX" || error=1
+
+        if is_integer "$TEMP_LOW" && is_integer "$TEMP_MEDIUM" && is_integer "$TEMP_HIGH" && is_integer "$TEMP_CRITICAL"; then
+            if (( TEMP_LOW >= TEMP_MEDIUM || TEMP_MEDIUM >= TEMP_HIGH || TEMP_HIGH >= TEMP_CRITICAL )); then
+                log "ERROR" "Temperature thresholds must increase: TEMP_LOW < TEMP_MEDIUM < TEMP_HIGH < TEMP_CRITICAL"
+                error=1
+            fi
+        fi
+
+        if is_integer "$FAN_SPEED_IDLE" && is_integer "$FAN_SPEED_LOW" && is_integer "$FAN_SPEED_MEDIUM" \
+            && is_integer "$FAN_SPEED_HIGH" && is_integer "$FAN_SPEED_CRITICAL"; then
+            if (( FAN_SPEED_IDLE > FAN_SPEED_LOW || FAN_SPEED_LOW > FAN_SPEED_MEDIUM \
+                || FAN_SPEED_MEDIUM > FAN_SPEED_HIGH || FAN_SPEED_HIGH > FAN_SPEED_CRITICAL )); then
+                log "ERROR" "Fan speeds must not decrease from idle through critical"
+                error=1
+            fi
+            if is_integer "$FAILSAFE_FAN_SPEED" && (( FAILSAFE_FAN_SPEED < FAN_SPEED_CRITICAL )); then
+                log "ERROR" "FAILSAFE_FAN_SPEED must be at least FAN_SPEED_CRITICAL"
+                error=1
+            fi
         fi
     fi
 
@@ -344,6 +440,7 @@ run_ipmitool() {
         return 0
     fi
 
+    log "DEBUG" "Running IPMI command against ${IDRAC_IP}: ${args[*]}"
     timeout "$COMMAND_TIMEOUT" env IPMI_PASSWORD="$IDRAC_PASSWORD" \
         ipmitool -I "$IPMI_INTERFACE" -H "$IDRAC_IP" -U "$IDRAC_ID" -E \
         -N "$IPMI_TIMEOUT" -R "$IPMI_RETRIES" "${args[@]}"
@@ -380,9 +477,10 @@ run_esxi_command() {
     fi
 
     ssh_command+=("${ESXI_USERNAME}@${ESXI_HOST}" "$remote_command")
+    log "DEBUG" "Running ESXi command against ${ESXI_HOST}:${ESXI_SSH_PORT} as ${ESXI_USERNAME}"
 
     if [[ -n "$ESXI_PASSWORD" && -z "$ESXI_SSH_KEY" ]]; then
-        timeout "$COMMAND_TIMEOUT" sshpass -p "$ESXI_PASSWORD" "${ssh_command[@]}"
+        SSHPASS="$ESXI_PASSWORD" timeout "$COMMAND_TIMEOUT" sshpass -e "${ssh_command[@]}"
     else
         timeout "$COMMAND_TIMEOUT" "${ssh_command[@]}"
     fi
@@ -394,7 +492,8 @@ get_esxi_drive_temperature() {
     local temp
 
     remote_device="$(remote_quote "$DRIVE_DEVICE")"
-    if ! output="$(run_esxi_command "esxcli storage core device smart get -d ${remote_device}" 2>/dev/null)"; then
+    if ! output="$(run_esxi_command "esxcli storage core device smart get -d ${remote_device}")"; then
+        log "DEBUG" "ESXi SMART query failed for device ${DRIVE_DEVICE}"
         return 1
     fi
 
@@ -410,6 +509,7 @@ get_esxi_drive_temperature() {
     ' <<< "$output")"
 
     if ! is_integer "$temp"; then
+        log "DEBUG" "ESXi SMART output did not contain a numeric Drive Temperature"
         return 1
     fi
 
@@ -452,12 +552,16 @@ get_idrac_temperatures() {
     local output
     local parsed
 
-    if ! output="$(run_ipmitool sdr type Temperature 2>/dev/null)"; then
+    if ! output="$(run_ipmitool sdr type Temperature)"; then
+        log "DEBUG" "iDRAC sensor query failed"
         return 1
     fi
 
     parsed="$(parse_idrac_sdr_temperatures <<< "$output")"
-    [[ -n "$parsed" ]] || return 1
+    if [[ -z "$parsed" ]]; then
+        log "DEBUG" "iDRAC returned no readable temperature sensors after filtering"
+        return 1
+    fi
     printf '%s\n' "$parsed"
 }
 
@@ -469,7 +573,8 @@ get_gpu_temperatures() {
 
     command -v nvidia-smi >/dev/null 2>&1 || return 1
 
-    if ! output="$(timeout "$COMMAND_TIMEOUT" nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader,nounits 2>/dev/null)"; then
+    if ! output="$(timeout "$COMMAND_TIMEOUT" nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader,nounits)"; then
+        log "DEBUG" "nvidia-smi temperature query failed"
         return 1
     fi
 
@@ -496,6 +601,7 @@ collect_temperature_readings() {
     IFS=',' read -r -a source_list <<< "$sources"
 
     for source in "${source_list[@]}"; do
+        log "DEBUG" "Collecting temperature source: ${source}"
         case "$source" in
             esxi)
                 if output="$(get_esxi_drive_temperature)"; then
@@ -527,18 +633,14 @@ collect_temperature_readings() {
     return "$found"
 }
 
-get_decision_temperature() {
-    local readings
+calculate_decision_temperature() {
+    local readings="$1"
     local source
     local label
     local temp
     local adjusted
     local max_temp=""
     local detail_text=""
-
-    if ! readings="$(collect_temperature_readings)"; then
-        return 1
-    fi
 
     while IFS=$'\t' read -r source label temp; do
         [[ -z "${source:-}" || -z "${temp:-}" ]] && continue
@@ -560,6 +662,16 @@ get_decision_temperature() {
 
     [[ -n "$max_temp" ]] || return 1
     printf '%s\t%s\n' "$max_temp" "$detail_text"
+}
+
+get_decision_temperature() {
+    local readings
+
+    if ! readings="$(collect_temperature_readings)"; then
+        return 1
+    fi
+
+    calculate_decision_temperature "$readings"
 }
 
 temperature_level() {
@@ -669,6 +781,7 @@ write_status_log() {
     local status="$4"
     local details="${5:-}"
 
+    details="$(sanitize_log_field "$details")"
     [[ -n "$LOG_DIR" ]] || return 0
     prepare_log_dir || return 1
     printf '%s status=%s temp=%s level=%s fan=%s%% details="%s"\n' \
@@ -764,6 +877,181 @@ once_mode() {
     control_cycle
 }
 
+credential_state() {
+    local value="${1:-}"
+
+    if [[ -z "$value" ]]; then
+        printf 'not set'
+    elif is_placeholder_value "$value"; then
+        printf 'placeholder (replace it)'
+    else
+        printf 'set (%s characters)' "${#value}"
+    fi
+}
+
+config_row() {
+    printf '  %-30s %s\n' "$1" "$2"
+}
+
+print_effective_config() {
+    local esxi_auth="password"
+
+    [[ -n "$ESXI_SSH_KEY" ]] && esxi_auth="ssh-key"
+
+    printf 'Effective configuration (credentials are never printed)\n'
+    printf '%s\n' '------------------------------------------------------------'
+    config_row "Operation mode" "$OPERATION_MODE"
+    config_row "Temperature sources" "$(normalize_sources)"
+    config_row "iDRAC target" "${IDRAC_ID}@${IDRAC_IP:-not set} (${IPMI_INTERFACE})"
+    config_row "iDRAC password" "$(credential_state "$IDRAC_PASSWORD")"
+    config_row "ESXi target" "${ESXI_USERNAME}@${ESXI_HOST:-not set}:${ESXI_SSH_PORT}"
+    config_row "ESXi authentication" "$esxi_auth"
+    config_row "ESXi password" "$(credential_state "$ESXI_PASSWORD")"
+    config_row "ESXi drive" "${DRIVE_DEVICE:-not set}"
+    config_row "Fan thresholds" "${TEMP_LOW}/${TEMP_MEDIUM}/${TEMP_HIGH}/${TEMP_CRITICAL} C"
+    config_row "Fan speeds" "${FAN_SPEED_IDLE}/${FAN_SPEED_LOW}/${FAN_SPEED_MEDIUM}/${FAN_SPEED_HIGH}/${FAN_SPEED_CRITICAL}%"
+    config_row "Hysteresis" "${HYSTERESIS} C"
+    config_row "Fail-safe" "enabled=${FAILSAFE_ON_ERROR}, speed=${FAILSAFE_FAN_SPEED}%"
+    config_row "Restore on exit" "$RESTORE_AUTO_ON_EXIT"
+    config_row "Timing" "interval=${CHECK_INTERVAL}s, command-timeout=${COMMAND_TIMEOUT}s"
+    config_row "Logging" "level=${LOG_LEVEL}, path=${LOG_DIR:-disabled}/${LOG_FILE}"
+    config_row "Dry run" "$DRY_RUN"
+}
+
+diagnostic_row() {
+    local status="$1"
+    local component="$2"
+    local detail="$3"
+    printf '[%-4s] %-20s %s\n' "$status" "$component" "$detail"
+}
+
+reading_summary() {
+    local readings="$1"
+    local source
+    local label
+    local temp
+    local summary=""
+
+    while IFS=$'\t' read -r source label temp; do
+        [[ -z "${source:-}" || -z "${temp:-}" ]] && continue
+        summary="${summary:+${summary}, }${label}=${temp}C"
+    done <<< "$readings"
+
+    printf '%s' "$summary"
+}
+
+diagnose_mode() {
+    local failures=0
+    local output
+    local summary
+    local sources
+    local source
+    local readings=""
+    local decision
+    local temp
+    local details
+    local selected
+    local level
+    local speed
+    local -a source_list
+
+    printf 'iDRAC Fan Control diagnostics (read-only)\n'
+    printf 'Generated: %s\n\n' "$(timestamp)"
+    diagnostic_row "PASS" "configuration" "static validation passed"
+
+    if [[ -z "$LOG_DIR" ]] || prepare_log_dir; then
+        diagnostic_row "PASS" "log path" "${LOG_DIR:-disabled}"
+    else
+        diagnostic_row "FAIL" "log path" "cannot write ${LOG_DIR}/${LOG_FILE}"
+        failures=$((failures + 1))
+    fi
+
+    if output="$(run_ipmitool mc info)"; then
+        summary="$(awk -F: '/Firmware Revision|Product Name/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); printf "%s%s", separator, $2; separator=", " }' <<< "$output")"
+        diagnostic_row "PASS" "iDRAC/IPMI" "${summary:-connection and authentication succeeded}"
+    else
+        diagnostic_row "FAIL" "iDRAC/IPMI" "connection, authentication, or IPMI-over-LAN failed"
+        failures=$((failures + 1))
+    fi
+
+    sources="$(normalize_sources)"
+    IFS=',' read -r -a source_list <<< "$sources"
+    for source in "${source_list[@]}"; do
+        output=""
+        case "$source" in
+            esxi) output="$(get_esxi_drive_temperature)" || true ;;
+            idrac) output="$(get_idrac_temperatures)" || true ;;
+            gpu) output="$(get_gpu_temperatures)" || true ;;
+        esac
+
+        if [[ -n "$output" ]]; then
+            diagnostic_row "PASS" "source:${source}" "$(reading_summary "$output")"
+            readings="${readings}${readings:+$'\n'}${output}"
+        else
+            diagnostic_row "FAIL" "source:${source}" "no valid temperature reading"
+            failures=$((failures + 1))
+        fi
+    done
+
+    if [[ -n "$readings" ]] && decision="$(calculate_decision_temperature "$readings")"; then
+        IFS=$'\t' read -r temp details <<< "$decision"
+        selected="$(choose_fan_speed "$temp")"
+        IFS=$'\t' read -r level speed <<< "$selected"
+        diagnostic_row "PASS" "decision preview" "${temp}C -> ${level} (${speed}%), no command sent"
+        log "DEBUG" "Diagnostic source details: ${details}"
+    else
+        diagnostic_row "FAIL" "decision preview" "no usable temperature remains"
+        failures=$((failures + 1))
+    fi
+
+    printf '\nResult: '
+    if (( failures == 0 )); then
+        printf 'PASS - controller dependencies are ready.\n'
+        return 0
+    fi
+
+    printf 'FAIL - %s check(s) need attention. Set LOG_LEVEL=DEBUG for command context.\n' "$failures"
+    return 1
+}
+
+healthcheck_mode() {
+    local log_path
+    local modified
+    local now
+    local age
+    local max_age
+
+    [[ "$OPERATION_MODE" == "auto" ]] || return 0
+    if [[ -z "$LOG_DIR" ]]; then
+        log "ERROR" "Healthcheck cannot verify auto mode when LOG_DIR is disabled"
+        return 1
+    fi
+
+    log_path="${LOG_DIR}/${LOG_FILE}"
+    if [[ ! -s "$log_path" ]]; then
+        log "ERROR" "Healthcheck has no control-cycle record at ${log_path}"
+        return 1
+    fi
+
+    if ! modified="$(stat -c '%Y' "$log_path" 2>/dev/null)"; then
+        log "ERROR" "Healthcheck cannot read the modification time for ${log_path}"
+        return 1
+    fi
+
+    now="$(date '+%s')"
+    age=$((now - modified))
+    (( age < 0 )) && age=0
+    max_age="$HEALTHCHECK_MAX_AGE"
+    (( max_age == 0 )) && max_age=$((CHECK_INTERVAL * 3 + COMMAND_TIMEOUT))
+
+    if (( age > max_age )); then
+        log "ERROR" "Healthcheck control loop is stale: last record ${age}s ago (limit ${max_age}s)"
+        return 1
+    fi
+
+    log "DEBUG" "Healthcheck passed: last control record ${age}s ago"
+}
+
 status_mode() {
     log "INFO" "iDRAC chassis status"
     run_ipmitool chassis status
@@ -781,8 +1069,23 @@ main() {
             usage
             return 0
             ;;
-        validate|healthcheck)
-            validate_config "$OPERATION_MODE"
+        config)
+            print_effective_config
+            return 0
+            ;;
+        validate)
+            validate_config "$OPERATION_MODE" || return 1
+            log "INFO" "Configuration is valid for OPERATION_MODE=${OPERATION_MODE}"
+            return 0
+            ;;
+        healthcheck)
+            validate_config "$OPERATION_MODE" || return 1
+            healthcheck_mode
+            return $?
+            ;;
+        diagnose)
+            validate_config "diagnose" || return 1
+            diagnose_mode
             return $?
             ;;
         auto|once|manual|restore|status)
