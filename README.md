@@ -1,19 +1,21 @@
 # iDRAC Fan Speed Control
 
-[![Tests](https://img.shields.io/badge/tests-make%20test-green)](#測試與品質門檻)
+**English** | [繁體中文](README.zh-TW.md)
+
+[![Tests](https://img.shields.io/badge/tests-make%20test-green)](#testing-and-quality-gates)
 [![Container](https://img.shields.io/badge/container-GHCR-blue)](https://github.com/DF-wu/iDRACFanSpeedControl/pkgs/container/idrac-fan-control)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-這是一個給 Dell PowerEdge 使用的風扇控制器。它透過 iDRAC 的 IPMI OEM raw command 設定 fan duty cycle，再用 ESXi NVMe SMART、iDRAC temperature sensor、NVIDIA GPU 中任一個或多個來源決定風扇曲線。
+A fan controller for Dell PowerEdge servers. It sets the fan duty cycle through iDRAC IPMI OEM raw commands, then selects a fan-curve level using one or more temperature sources: ESXi NVMe SMART, iDRAC temperature sensors, or NVIDIA GPUs.
 
 > [!CAUTION]
-> 這個程式會暫時覆寫 Dell 原廠風扇控制。第一次設定請保留 iDRAC Web UI 或實體主控台，先用 `manual`、`restore`、`diagnose` 驗證，再讓 `auto` 長時間執行。任何過熱、讀值不可信或行為異常時，立即執行 `restore` 並停止容器。
+> This program temporarily overrides Dell's automatic fan control. During initial setup, keep the iDRAC Web UI or a physical console available. Verify `manual`, `restore`, and `diagnose` before running `auto` for an extended period. If the server overheats, readings become unreliable, or behavior is abnormal, run `restore` immediately and stop the container.
 
-## 先看懂它如何工作
+## How it works
 
 ```mermaid
 flowchart LR
-    TUI[make tui\n互動式設定] --> ENV[.env\n600 permissions]
+    TUI[make tui\nInteractive setup] --> ENV[.env\n600 permissions]
     ENV --> COMPOSE[Docker Compose]
     COMPOSE --> CTRL[fan-control.sh]
     CTRL --> IPMI[iDRAC / IPMI\nfan raw command]
@@ -23,15 +25,15 @@ flowchart LR
     CTRL --> LOG[logs/fan_control.log\nhealthcheck]
 ```
 
-控制器只會對 iDRAC 發送風扇命令；溫度來源全部是讀取。多來源時採用最高的有效決策溫度，GPU 會先減去 `GPU_TEMP_OFFSET`，避免 GPU 的封裝溫度直接把機箱風扇推到不必要的高轉速。
+The controller sends fan commands only to iDRAC; all temperature sources are read-only. When multiple sources are enabled, it uses the highest valid decision temperature. The GPU reading is adjusted by `GPU_TEMP_OFFSET` first, preventing the GPU package temperature from driving chassis fans unnecessarily fast.
 
-![iDRAC IPMI over LAN 設定畫面](images/image.png)
+![iDRAC IPMI over LAN settings](images/image.png)
 
-*圖 1：在 iDRAC Web UI 開啟 IPMI over LAN；實際選項名稱會依 iDRAC 韌體版本略有不同。*
+*Figure 1: Enabling IPMI over LAN in the iDRAC Web UI. The exact option name may vary by iDRAC firmware version.*
 
-## 快速開始：用 TUI 完成安全的第一次設定
+## Quick start: safe first-time setup with the TUI
 
-建議在 Docker 主機上操作。TUI 不需要 `dialog`、Python 或其他額外套件；它使用純 Bash，會保留 `.env.example` 的註解、以原子方式更新檔案，並將檔案權限設為 `600`。
+Run the setup on the Docker host. The TUI requires no `dialog`, Python, or other additional packages. It is written in pure Bash, preserves comments from `.env.example`, updates files atomically, and sets file permissions to `600`.
 
 ```bash
 git clone https://github.com/DF-wu/iDRACFanSpeedControl.git
@@ -39,7 +41,7 @@ cd iDRACFanSpeedControl
 make tui
 ```
 
-主畫面如下（每次進入子頁都會寫回 `.env`，離開時會再次顯示檔案位置）：
+The main menu looks like this. Each submenu writes changes back to `.env`, and the file location is shown again when you exit.
 
 ```text
 ╭────────────────────────────────────────────────────────────╮
@@ -53,7 +55,7 @@ make tui
   5) Fan curve                0) Save and exit
 ```
 
-第一次建議選 `iDRAC sensors only`，先不要把 ESXi 或 GPU 加入決策。TUI 完成後，依序執行：
+For your first setup, select `iDRAC sensors only` and leave ESXi and GPU sources disabled. After completing the TUI, run:
 
 ```bash
 make validate
@@ -62,15 +64,15 @@ docker compose up -d
 docker logs -f idrac-fan-control
 ```
 
-`diagnose` 是唯讀檢查，不會送出風扇 raw command。它會逐項顯示 iDRAC、每個溫度來源、可寫 log 路徑與「如果現在控制會選哪一檔」的 preview。若某個來源不用，從 TUI 的 source preset 移除它，而不是忽略錯誤後繼續運行。
+`diagnose` is read-only and never sends fan raw commands. It checks iDRAC, every temperature source, the writable log path, and previews the fan level that would be selected. If you do not need a source, remove it from the TUI source preset instead of ignoring its errors.
 
-若要編輯另一份設定檔：
+To edit a different configuration file:
 
 ```bash
 src/fan-control-tui.sh --config /path/to/staging.env
 ```
 
-### 手動建立 `.env`（不用 TUI 也可以）
+### Create `.env` manually
 
 ```bash
 cp .env.example .env
@@ -78,7 +80,7 @@ chmod 600 .env
 $EDITOR .env
 ```
 
-最小的 iDRAC-only 範例：
+Minimal iDRAC-only example:
 
 ```dotenv
 IDRAC_IP=192.0.2.10
@@ -88,23 +90,23 @@ OPERATION_MODE=auto
 TEMPERATURE_SOURCES=idrac
 ```
 
-先將 `IDRAC_PASSWORD`、IP 與管理網路換成真實值。`.env.example` 的 `192.0.2.*`、`change-me`、`replace_with_*` 都是故意放的 placeholder，`validate` 會拒絕它們。
+Replace `IDRAC_PASSWORD`, the IP address, and the management network with real values. Values such as `192.0.2.*`, `change-me`, and `replace_with_*` in `.env.example` are intentional placeholders and will be rejected by `validate`.
 
-## 命令速查
+## Command reference
 
-| 命令 | 作用 | 是否改變風扇 |
+| Command | Purpose | Changes fan control |
 | --- | --- | --- |
-| `auto` | 持續依曲線控制，離開時依設定還原自動模式 | 是 |
-| `once` | 讀取一次並套用一個決策後離開 | 是 |
-| `manual 35` | 設定 35% duty cycle；未帶數字時讀 `MANUAL_FAN_SPEED` | 是 |
-| `restore` | 發送 Dell 自動風扇控制命令 | 是（還原） |
-| `status` | 顯示 chassis 與原始 temperature SDR | 否 |
-| `config` | 顯示有效設定摘要，密碼只顯示「set／長度」 | 否 |
-| `validate` | 檢查數值、placeholder、依賴命令與來源條件 | 否 |
-| `diagnose` | 逐項連線與溫度讀值探測，含決策 preview | 否 |
-| `healthcheck` | 檢查設定與 auto 控制 log 是否在合理時間內更新 | 否 |
+| `auto` | Continuously controls fans from the configured curve and restores automatic mode on exit when configured | Yes |
+| `once` | Reads temperatures once, applies one decision, and exits | Yes |
+| `manual 35` | Sets a 35% duty cycle; without a number, uses `MANUAL_FAN_SPEED` | Yes |
+| `restore` | Sends the Dell automatic fan-control command | Yes (restore) |
+| `status` | Shows chassis status and raw temperature SDR data | No |
+| `config` | Shows the effective configuration; passwords are shown only as set/length | No |
+| `validate` | Checks values, placeholders, required commands, and source conditions | No |
+| `diagnose` | Probes connections and temperature readings and shows a decision preview | No |
+| `healthcheck` | Checks configuration and whether the auto-control log was updated recently enough | No |
 
-Docker Compose 用法：
+With Docker Compose:
 
 ```bash
 docker compose run --rm idrac-fan-control config
@@ -116,132 +118,132 @@ docker compose run --rm idrac-fan-control manual 35
 docker compose run --rm idrac-fan-control restore
 ```
 
-本機腳本可直接使用相同命令：
+The local script accepts the same commands:
 
 ```bash
 src/FanControlWithEsxiSmart.sh diagnose
 src/FanControlWithEsxiSmart.sh config
 ```
 
-本機執行需要 `bash`、`coreutils`、`ipmitool`、`timeout`，ESXi password 模式另需 `sshpass`；Docker image 已包含這些依賴。
+Local execution requires `bash`, `coreutils`, `ipmitool`, and `timeout`. ESXi password authentication also requires `sshpass`. The Docker image includes these dependencies.
 
-## 安全啟動順序
+## Safe startup sequence
 
 ```mermaid
 sequenceDiagram
-    participant U as 操作者
+    participant U as Operator
     participant C as Controller
     participant D as iDRAC
     U->>C: validate
-    C-->>U: 靜態設定與依賴結果
+    C-->>U: Static configuration and dependency results
     U->>C: diagnose
     C->>D: mc info / SDR (read-only)
-    D-->>C: 連線與溫度
-    C-->>U: source checks + decision preview
+    D-->>C: Connection and temperatures
+    C-->>U: Source checks + decision preview
     U->>C: manual 30
-    C->>D: set fan duty (受控測試)
+    C->>D: Set fan duty (controlled test)
     U->>C: restore
     C->>D: Dell automatic fan control
     U->>C: auto
 ```
 
-正式開始前逐項確認：
+Before unattended operation, confirm each item:
 
-1. iDRAC Web UI 的 IPMI over LAN 已開啟，管理網路可達。
-2. iDRAC 帳號具備必要權限，密碼不再是 placeholder。
-3. `manual 30` 能設定低速，`manual 70` 能設定保守速度，`restore` 能回到 Dell 自動模式。
-4. `diagnose` 的每一個已啟用來源都是 `[PASS]`；不用的來源請停用。
-5. 先以較保守的 `FAILSAFE_FAN_SPEED` 和 `RESTORE_AUTO_ON_EXIT=true` 運行。
+1. IPMI over LAN is enabled in the iDRAC Web UI and the management network is reachable.
+2. The iDRAC account has the required permissions and its password is not a placeholder.
+3. `manual 30` sets a low speed, `manual 70` sets a conservative speed, and `restore` returns control to Dell automatic mode.
+4. Every enabled source reports `[PASS]` in `diagnose`; disable sources you do not use.
+5. Start with a conservative `FAILSAFE_FAN_SPEED` and `RESTORE_AUTO_ON_EXIT=true`.
 
-## 溫度來源與控制決策
+## Temperature sources and control decisions
 
-`TEMPERATURE_SOURCES` 使用逗號分隔，可填 `esxi`、`idrac`、`gpu`。來源可以混合；控制器會保留每個來源的 label 供 log 與診斷追蹤。
+`TEMPERATURE_SOURCES` is a comma-separated list containing `esxi`, `idrac`, and/or `gpu`. Sources can be combined, and the controller retains each source label for logging and diagnostics.
 
-| 來源 | 讀取內容 | 必要條件 | 失敗時的行為 |
+| Source | Reading | Requirements | Behavior on failure |
 | --- | --- | --- | --- |
-| `idrac` | `ipmitool sdr type Temperature` 中可讀的 sensor | iDRAC IPMI | 該來源標記失敗 |
-| `esxi` | 指定 NVMe 的 `esxcli storage core device smart get` | SSH、`DRIVE_DEVICE` | 該來源標記失敗 |
-| `gpu` | `nvidia-smi` 的每張 GPU 溫度 | NVIDIA Container Toolkit／驅動 | 該來源標記失敗 |
+| `idrac` | Readable sensors from `ipmitool sdr type Temperature` | iDRAC IPMI | Marks this source as failed |
+| `esxi` | `esxcli storage core device smart get` for the configured NVMe device | SSH and `DRIVE_DEVICE` | Marks this source as failed |
+| `gpu` | Temperature of each GPU reported by `nvidia-smi` | NVIDIA Container Toolkit and driver | Marks this source as failed |
 
 ```mermaid
 flowchart TD
-    R[所有有效 readings] --> M{取最高 adjusted temperature}
+    R[All valid readings] --> M{Select highest adjusted temperature}
     M --> L[temperature_level]
-    L --> H{比上一檔更低?}
-    H -- 否 --> S[立即升檔或維持]
-    H -- 是 --> X{低於前一檔 threshold - HYSTERESIS?}
-    X -- 否 --> S2[維持上一檔]
-    X -- 是 --> S3[降到新檔]
-    S --> F[套用 fan speed]
+    L --> H{Lower than previous level?}
+    H -- No --> S[Increase immediately or keep level]
+    H -- Yes --> X{Below previous threshold - HYSTERESIS?}
+    X -- No --> S2[Keep previous level]
+    X -- Yes --> S3[Move to lower level]
+    S --> F[Apply fan speed]
     S2 --> F
     S3 --> F
-    R -. 全部失敗 .-> FS[FAILSAFE_FAN_SPEED]
+    R -. All sources fail .-> FS[FAILSAFE_FAN_SPEED]
 ```
 
-預設曲線如下；`validate` 會確保 threshold 嚴格遞增、fan speed 不遞減，且 fail-safe 不低於 critical speed。
+The default curve is shown below. `validate` ensures that thresholds are strictly increasing, fan speeds never decrease, and the fail-safe speed is not lower than the critical speed.
 
-| Level | 決策溫度 | 預設風扇 |
+| Level | Decision temperature | Default fan speed |
 | --- | --- | --- |
 | `idle` | `<65°C` | 25% |
 | `low` | `65–69°C` | 30% |
 | `medium` | `70–74°C` | 40% |
 | `high` | `75–79°C` | 50% |
 | `critical` | `>=80°C` | 60% |
-| `failsafe` | 所有來源失敗 | 70% |
+| `failsafe` | All sources fail | 70% |
 
-降檔會等待 `HYSTERESIS` 度，避免溫度在閾值附近來回跳速；升檔不延遲。GPU 的 adjusted 值為 `GPU_TEMP - GPU_TEMP_OFFSET`，最低不會小於 0°C。
+Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` degrees below the relevant threshold, preventing repeated speed changes near a boundary. Moving to a higher level is immediate. The adjusted GPU value is `GPU_TEMP - GPU_TEMP_OFFSET`, with a minimum of 0°C.
 
-## 設定參考
+## Configuration reference
 
-### 連線與模式
+### Connection and operating mode
 
-| 變數 | 預設 | 說明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `IDRAC_IP` | 空 | iDRAC hostname 或 IP；所有 fan 命令必要 |
-| `IDRAC_ID` | `root` | iDRAC 使用者 |
-| `IDRAC_PASSWORD` | 空 | 由 `IPMI_PASSWORD` environment 傳給 `ipmitool -E`，不出現在 argv |
-| `IPMI_INTERFACE` | `lanplus` | 通常保持不變 |
-| `IPMI_TIMEOUT` / `IPMI_RETRIES` | `5` / `2` | 單次 timeout 與 retry |
-| `OPERATION_MODE` | `manual` | `auto`、`once`、`manual` |
-| `DRY_RUN` | `false` | 只在測試命令組合時使用；不會產生真實讀值 |
-| `COMMAND_TIMEOUT` | `20` | SSH、IPMI、GPU 外部命令上限（秒） |
-| `CHECK_INTERVAL` | `60` | auto 每個 cycle 間隔（秒） |
-| `RESTORE_AUTO_ON_EXIT` | `true` | auto 收到 SIGTERM／離開時還原 |
+| `IDRAC_IP` | Empty | iDRAC hostname or IP; required for all fan commands |
+| `IDRAC_ID` | `root` | iDRAC user |
+| `IDRAC_PASSWORD` | Empty | Passed to `ipmitool -E` through the `IPMI_PASSWORD` environment variable; never appears in argv |
+| `IPMI_INTERFACE` | `lanplus` | Usually left unchanged |
+| `IPMI_TIMEOUT` / `IPMI_RETRIES` | `5` / `2` | Per-command timeout and retry count |
+| `OPERATION_MODE` | `manual` | `auto`, `once`, or `manual` |
+| `DRY_RUN` | `false` | Only for testing command construction; does not produce real readings |
+| `COMMAND_TIMEOUT` | `20` | Maximum duration in seconds for SSH, IPMI, and GPU commands |
+| `CHECK_INTERVAL` | `60` | Seconds between cycles in auto mode |
+| `RESTORE_AUTO_ON_EXIT` | `true` | Restores automatic control when auto mode receives SIGTERM or exits |
 
-### 溫度來源
+### Temperature sources
 
-| 變數 | 預設 | 說明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `TEMPERATURE_SOURCES` | `esxi` | `esxi,idrac,gpu` 的逗號清單 |
-| `WITH_GPU_TEMP` | `false` | 舊版相容開關；true 會附加 `gpu` |
-| `GPU_TEMP_OFFSET` | `15` | GPU 溫度的補償度數 |
-| `ESXI_HOST` / `ESXI_USERNAME` | 空 / `root` | ESXi SSH 目標 |
-| `ESXI_PASSWORD` | 空 | 沒有 key 時使用；TUI 不會回顯 |
-| `ESXI_SSH_KEY` | 空 | 設定後優先使用 key authentication |
-| `ESXI_SSH_PORT` | `22` | SSH port（1–65535） |
-| `SSH_CONNECT_TIMEOUT` | `10` | SSH 建立連線上限（秒） |
-| `SSH_STRICT_HOST_KEY_CHECKING` | `accept-new` | `yes`、`no`、`ask` 或 `accept-new` |
-| `DRIVE_DEVICE` | 空 | `esxcli storage core device list` 找到的完整 ID |
-| `IDRAC_SENSOR_INCLUDE_REGEX` | 空 | 只保留符合 sensor 名稱的 awk regex |
-| `IDRAC_SENSOR_EXCLUDE_REGEX` | `no reading\|disabled\|not readable` | 排除無效 SDR |
+| `TEMPERATURE_SOURCES` | `esxi` | Comma-separated list of `esxi,idrac,gpu` |
+| `WITH_GPU_TEMP` | `false` | Legacy compatibility switch; `true` appends `gpu` |
+| `GPU_TEMP_OFFSET` | `15` | Offset subtracted from GPU temperature |
+| `ESXI_HOST` / `ESXI_USERNAME` | Empty / `root` | ESXi SSH target |
+| `ESXI_PASSWORD` | Empty | Used when no key is configured; never echoed by the TUI |
+| `ESXI_SSH_KEY` | Empty | Preferred over password authentication when set |
+| `ESXI_SSH_PORT` | `22` | SSH port (1–65535) |
+| `SSH_CONNECT_TIMEOUT` | `10` | SSH connection timeout in seconds |
+| `SSH_STRICT_HOST_KEY_CHECKING` | `accept-new` | `yes`, `no`, `ask`, or `accept-new` |
+| `DRIVE_DEVICE` | Empty | Full ID returned by `esxcli storage core device list` |
+| `IDRAC_SENSOR_INCLUDE_REGEX` | Empty | awk regex used to keep matching sensor names only |
+| `IDRAC_SENSOR_EXCLUDE_REGEX` | `no reading\|disabled\|not readable` | Excludes invalid SDR entries |
 
-### 風扇曲線、安全與診斷
+### Fan curve, safety, and diagnostics
 
-| 變數 | 預設 | 說明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `TEMP_LOW/MEDIUM/HIGH/CRITICAL` | `65/70/75/80` | 嚴格遞增的°C threshold |
-| `FAN_SPEED_IDLE/LOW/MEDIUM/HIGH/CRITICAL` | `25/30/40/50/60` | 1–100%，不可遞減 |
-| `HYSTERESIS` | `2` | 降檔所需低於前 threshold 的°C |
-| `FAILSAFE_ON_ERROR` | `true` | 所有來源失敗時使用保守速度 |
-| `FAILSAFE_FAN_SPEED` | `70` | 必須 >= critical speed |
-| `MANUAL_FAN_SPEED` | `35` | `manual` 未帶參數時使用 |
-| `LOG_DIR` / `LOG_FILE` | `/var/log/fan-control` / `fan_control.log` | 持久化狀態 log |
-| `LOG_LEVEL` | `INFO` | `DEBUG` 會增加命令與來源細節，絕不列密碼 |
-| `HEALTHCHECK_MAX_AGE` | `0` | 0 代表 `CHECK_INTERVAL*3 + COMMAND_TIMEOUT` |
+| `TEMP_LOW/MEDIUM/HIGH/CRITICAL` | `65/70/75/80` | Strictly increasing thresholds in °C |
+| `FAN_SPEED_IDLE/LOW/MEDIUM/HIGH/CRITICAL` | `25/30/40/50/60` | Values from 1–100% that must not decrease |
+| `HYSTERESIS` | `2` | Degrees below the previous threshold required before lowering fan speed |
+| `FAILSAFE_ON_ERROR` | `true` | Uses a conservative speed when all sources fail |
+| `FAILSAFE_FAN_SPEED` | `70` | Must be greater than or equal to the critical speed |
+| `MANUAL_FAN_SPEED` | `35` | Used by `manual` when no argument is provided |
+| `LOG_DIR` / `LOG_FILE` | `/var/log/fan-control` / `fan_control.log` | Persistent state log |
+| `LOG_LEVEL` | `INFO` | `DEBUG` adds command and source details but never logs passwords |
+| `HEALTHCHECK_MAX_AGE` | `0` | `0` means `CHECK_INTERVAL*3 + COMMAND_TIMEOUT` |
 
-## Docker 部署與 GPU
+## Docker deployment and GPU support
 
-Compose 預設使用 GHCR image、host network 與 `./logs` volume：
+The Compose configuration uses the GHCR image, host networking, and a `./logs` volume by default:
 
 ```bash
 docker compose pull
@@ -250,43 +252,43 @@ docker compose ps
 docker inspect --format '{{.State.Health.Status}}' idrac-fan-control
 ```
 
-`healthcheck` 不只驗證 env；在 `OPERATION_MODE=auto` 時也會確認 `fan_control.log` 在 `HEALTHCHECK_MAX_AGE` 內更新。若資料來源全部失敗且 `FAILSAFE_ON_ERROR=false`，控制 cycle 不會寫成功紀錄，容器會變成 unhealthy，這是刻意的安全訊號。
+The `healthcheck` verifies more than environment configuration. In `OPERATION_MODE=auto`, it also confirms that `fan_control.log` has been updated within `HEALTHCHECK_MAX_AGE`. If every data source fails while `FAILSAFE_ON_ERROR=false`, the control cycle does not write a success record and the container becomes unhealthy. This is an intentional safety signal.
 
-GPU 模式需要 NVIDIA Container Toolkit。編輯 `docker-compose.yml`，取消 `gpus: all` 註解，再設定：
+GPU mode requires the NVIDIA Container Toolkit. Uncomment `gpus: all` in `docker-compose.yml`, then configure:
 
 ```dotenv
 TEMPERATURE_SOURCES=idrac,gpu
 GPU_TEMP_OFFSET=15
 ```
 
-驗證：
+Verify the setup:
 
 ```bash
 docker run --rm --gpus all nvidia/cuda:12.9.0-runtime-ubuntu24.04 nvidia-smi
 docker compose run --rm idrac-fan-control diagnose
 ```
 
-若不需要 GPU，使用不含 CUDA 的本機 build 可降低 image 大小：
+If GPU support is unnecessary, build locally without CUDA to reduce the image size:
 
 ```bash
 docker build --build-arg BASE_IMAGE=ubuntu:24.04 -t idrac-fan-control:local .
 ```
 
-## Debug、log 與故障排除
+## Debugging, logs, and troubleshooting
 
-正常 log 範例：
+Example normal log entry:
 
 ```text
 2026-07-18 03:12:10 [INFO] Control temp 68C -> low (30%). Sources: idrac:Inlet Temp=68C
 ```
 
-需要更多上下文時暫時設定：
+For additional context, temporarily set:
 
 ```dotenv
 LOG_LEVEL=DEBUG
 ```
 
-再觀察：
+Then inspect:
 
 ```bash
 docker logs -f idrac-fan-control
@@ -294,77 +296,78 @@ tail -f logs/fan_control.log
 docker compose run --rm idrac-fan-control diagnose
 ```
 
-`DEBUG` 只會印目標、命令種類、來源選擇與失敗階段；密碼不會放在 argv，也不會寫入 config summary。完整的症狀→檢查→修復表請看 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。日常與緊急操作請看 [USAGE_GUIDE.md](USAGE_GUIDE.md)。
+`DEBUG` logs targets, command types, source selection, and failure stages only. Passwords never appear in argv or the configuration summary. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for the complete symptom → check → fix table, and [USAGE_GUIDE.md](USAGE_GUIDE.md) for routine and emergency operations.
 
-常見最短修復路徑：
+Shortest recovery path for common problems:
 
 ```bash
-# 任何不確定的風險先還原 Dell 自動控制
+# Restore Dell automatic control first whenever risk is uncertain
 docker compose run --rm idrac-fan-control restore
 
-# 看目前有效設定與依賴狀態
+# Inspect the effective configuration and dependency state
 docker compose run --rm idrac-fan-control config
 docker compose run --rm idrac-fan-control diagnose
 ```
 
-## 安全與備份
+## Security and backups
 
-- `.env`、`logs/`、私鑰與 incident dump 都不應提交到 Git；TUI 會將設定檔權限設為 `600`。
-- Compose 會以 read-only 掛載 gitignored 的 `./secrets` 到 `/run/secrets`；ESXi key 請使用容器內路徑（例如 `/run/secrets/esxi_ed25519`）。
-- 優先使用 `ESXI_SSH_KEY`；若必須用 password，控制器會以 `SSHPASS` environment 搭配 `sshpass -e`，不把密碼放進 argv。
-- iDRAC 密碼透過 `IPMI_PASSWORD` environment 搭配 `ipmitool -E`；`config`／TUI review 只顯示 set 與字元數。
-- iDRAC／ESXi 應位於隔離管理網路，避免把 IPMI over LAN 暴露到公網。
-- 每次變更 `.env` 前保留一份 `chmod 600` 的離線備份，並測試 `restore`。
+- Never commit `.env`, `logs/`, private keys, or incident dumps. The TUI sets configuration file permissions to `600`.
+- Compose mounts the gitignored `./secrets` directory read-only at `/run/secrets`. Use the in-container path for ESXi keys, such as `/run/secrets/esxi_ed25519`.
+- Prefer `ESXI_SSH_KEY`. When password authentication is required, the controller uses the `SSHPASS` environment variable with `sshpass -e`, keeping the password out of argv.
+- The iDRAC password is supplied through the `IPMI_PASSWORD` environment variable and `ipmitool -E`. The `config` command and TUI review show only whether it is set and its character count.
+- Keep iDRAC and ESXi on an isolated management network. Never expose IPMI over LAN to the public internet.
+- Before changing `.env`, keep an offline backup with `600` permissions and test `restore`.
 
-## 從哪裡取得 ESXi drive identifier
+## Finding the ESXi drive identifier
 
 ```bash
 ssh root@ESXI_HOST
 esxcli storage core device list
-esxcli storage core device smart get -d 't10.NVMe____完整識別字串'
+esxcli storage core device smart get -d 't10.NVMe____full_identifier_string'
 ```
 
-把完整 identifier 放到 `DRIVE_DEVICE`，不要自行縮短。若 SMART 輸出沒有 `Drive Temperature` 數值，`diagnose` 會將 ESXi source 標成 FAIL，而不會偷偷把錯誤當成 0°C。
+Copy the complete identifier into `DRIVE_DEVICE`; do not shorten it. If the SMART output does not include a numeric `Drive Temperature`, `diagnose` marks the ESXi source as failed instead of silently treating the error as 0°C.
 
-## 測試與品質門檻
+## Testing and quality gates
 
 ```bash
-make test             # bash -n + 37 個核心 assertions + 10 個 TUI assertions
-make validate         # 以 Docker 依賴檢查目前的 .env（不改變風扇）
-make validate-example # 不需要 .env 的 DRY_RUN smoke test
+make test             # bash -n + 37 core assertions + 10 TUI assertions
+make validate         # Check the current .env with Docker dependencies; does not change fans
+make validate-example # DRY_RUN smoke test that does not require .env
 make docker-build
 ```
 
-測試涵蓋 source normalization、SDR parsing、GPU offset、hysteresis、fail-safe、曲線／port／regex 驗證、credential redaction、health freshness、診斷 preview，以及 TUI 設定檔的安全 round-trip。真實硬體、ESXi SSH 和 GPU 仍須在你的管理網路上以 `diagnose` 驗證。
+Tests cover source normalization, SDR parsing, GPU offset, hysteresis, fail-safe behavior, curve/port/regex validation, credential redaction, health freshness, diagnostic previews, and safe round-tripping of TUI configuration files. Real hardware, ESXi SSH, and GPUs must still be verified with `diagnose` on your management network.
 
-## 專案結構
+## Project structure
 
 ```text
 .
 ├── src/
-│   ├── FanControlWithEsxiSmart.sh   # 控制器、validate、diagnose、healthcheck
-│   ├── fan-control-tui.sh           # 純 Bash 設定 TUI
-│   └── setIdracFanSpeed.sh          # 舊腳本相容 wrapper
+│   ├── FanControlWithEsxiSmart.sh   # Controller, validate, diagnose, and healthcheck
+│   ├── fan-control-tui.sh           # Pure Bash setup TUI
+│   └── setIdracFanSpeed.sh          # Compatibility wrapper for the legacy script
 ├── tests/
-│   ├── fan-control.test.sh          # 核心邏輯與安全測試
-│   └── tui.test.sh                  # .env parser / writer 測試
+│   ├── fan-control.test.sh          # Core logic and safety tests
+│   └── tui.test.sh                  # .env parser/writer tests
 ├── docs/
-│   └── TROUBLESHOOTING.md           # 症狀導向除錯手冊
-├── images/image.png                 # iDRAC IPMI 設定畫面
-├── .env.example                     # 帶完整註解的設定模板
+│   └── TROUBLESHOOTING.md           # Symptom-based troubleshooting guide
+├── images/image.png                 # iDRAC IPMI settings screenshot
+├── .env.example                     # Fully commented configuration template
 ├── docker-compose.yml
 ├── Dockerfile
 ├── Makefile
-├── README.md
+├── README.md                        # English documentation
+├── README.zh-TW.md                  # Traditional Chinese documentation
 └── USAGE_GUIDE.md
 ```
 
-## 相容性與限制
+## Compatibility and limitations
 
-專案以 Dell PowerEdge R730/R730xd、iDRAC 8 類機型的 OEM fan raw command 為主要驗證目標。其他世代可能相容，但不能假設相同；請在無人值守前完成 `manual`／`restore`／`diagnose`。iDRAC、ESXi、GPU 的實際 sensor 名稱與權限會依韌體和驅動改變，應以你自己的 diagnostic output 為準。
+The project primarily targets Dell PowerEdge R730/R730xd-class systems with iDRAC 8 OEM fan raw commands. Other generations may be compatible, but identical behavior must not be assumed. Complete `manual`, `restore`, and `diagnose` checks before unattended operation. Actual iDRAC, ESXi, and GPU sensor names and permissions vary by firmware and driver, so rely on diagnostic output from your own environment.
 
-## 授權
+## License
 
-MIT，詳見 [LICENSE](LICENSE)。
+MIT. See [LICENSE](LICENSE).
 
-文件最後檢視：2026-07-18。
+Documentation last reviewed: July 18, 2026.
