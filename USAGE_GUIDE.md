@@ -124,6 +124,38 @@ cp ~/.ssh/esxi_ed25519 secrets/esxi_ed25519
 chmod 600 secrets/esxi_ed25519
 ```
 
+### TrueNAS CD6 與其他 VM 的 GPU
+
+目前 TrueNAS 25.10 主機上的 Kioxia CD6 controller device 是 `/dev/nvme1`。先在 host 唯讀確認：
+
+```bash
+sudo smartctl -A -j /dev/nvme1 | jq '.temperature.current'
+```
+
+設定 CD6 與多台 NVIDIA VM：
+
+```dotenv
+TEMPERATURE_SOURCES=linux_disk,remote_gpu
+LINUX_DISK_DEVICES=/dev/nvme1
+LINUX_DISK_TEMP_OFFSET=0
+
+REMOTE_GPU_HOSTS=gpu-vm-1,gpu-vm-2
+REMOTE_GPU_USERNAME=monitor
+REMOTE_GPU_SSH_KEY=/run/secrets/gpu_vms_ed25519
+REMOTE_GPU_PASSWORD=
+REMOTE_GPU_SSH_PORT=22
+REMOTE_GPU_TEMP_OFFSET=15
+```
+
+在 `docker-compose.yml` 的 service 加入精確 device mapping：
+
+```yaml
+devices:
+  - /dev/nvme1:/dev/nvme1
+```
+
+每台 GPU VM 必須讓該 SSH 帳號可執行唯讀的 `nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader,nounits`。設定後先跑 `validate` 與 `diagnose`；預期同時看到 `source:linux_disk`、`source:remote_gpu` 和 decision preview。詳見 [Temperature source interface](docs/TEMPERATURE_SOURCES.md)。
+
 ### 啟用 GPU
 
 ```dotenv
@@ -178,4 +210,4 @@ make docker-build
 
 長時間運行請確認 `logs/` 有輪替策略；專案只負責寫入單一 log，不會替主機設定 logrotate。建議以主機的 logrotate 或 journald retention 管理容量。
 
-文件最後檢視：2026-07-18。
+文件最後檢視：2026-08-15。

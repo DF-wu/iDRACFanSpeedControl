@@ -2,7 +2,7 @@ ARG BASE_IMAGE=nvidia/cuda:12.9.0-runtime-ubuntu24.04
 FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="iDRAC Fan Speed Control" \
-      org.opencontainers.image.description="Automatic Dell iDRAC fan control using IPMI with ESXi, iDRAC, and optional NVIDIA GPU temperature sources" \
+      org.opencontainers.image.description="Automatic Dell iDRAC fan control with pluggable disk, iDRAC, and NVIDIA GPU temperature sources" \
       org.opencontainers.image.source="https://github.com/DF-wu/iDRACFanSpeedControl"
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -13,8 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     coreutils \
     ipmitool \
+    jq \
     openssh-client \
     procps \
+    smartmontools \
     sshpass \
     tini \
     && rm -rf /var/lib/apt/lists/*

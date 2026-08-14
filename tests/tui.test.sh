@@ -90,10 +90,22 @@ test_load_config_environment_is_allowlisted() {
     assert_eq "$before" "$PATH" "does not overwrite unrelated process environment"
 }
 
+test_new_source_configuration_round_trips() {
+    config_set LINUX_DISK_DEVICES '/dev/nvme1,/dev/sdb'
+    config_set REMOTE_GPU_HOSTS 'gpu-vm-1,gpu-vm-2'
+    config_set REMOTE_GPU_PASSWORD 'remote secret'
+
+    assert_eq '/dev/nvme1,/dev/sdb' "$(config_get LINUX_DISK_DEVICES)" "round-trips Linux disk devices"
+    assert_eq 'gpu-vm-1,gpu-vm-2' "$(config_get REMOTE_GPU_HOSTS)" "round-trips remote GPU hosts"
+    assert_eq 'remote secret' "$(config_get REMOTE_GPU_PASSWORD)" "round-trips the remote GPU credential"
+    assert_eq 'set (13 characters)' "$(masked_state "$(config_get REMOTE_GPU_PASSWORD)")" "masks the remote GPU credential"
+}
+
 test_config_round_trip_and_preserves_comments
 test_config_set_does_not_duplicate_keys
 test_config_rejects_unknown_key_and_newline
 test_sensitive_values_are_only_summarized
 test_load_config_environment_is_allowlisted
+test_new_source_configuration_round_trips
 
 printf 'ok - %s assertions passed\n' "$PASS_COUNT"

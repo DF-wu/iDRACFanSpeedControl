@@ -6,7 +6,7 @@
 [![Container](https://img.shields.io/badge/container-GHCR-blue)](https://github.com/DF-wu/iDRACFanSpeedControl/pkgs/container/idrac-fan-control)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-A fan controller for Dell PowerEdge servers. It sets the fan duty cycle through iDRAC IPMI OEM raw commands, then selects a fan-curve level using one or more temperature sources: ESXi NVMe SMART, iDRAC temperature sensors, or NVIDIA GPUs.
+A fan controller for Dell PowerEdge servers. It sets the fan duty cycle through iDRAC IPMI OEM raw commands, then selects a fan-curve level from pluggable temperature sources: ESXi NVMe SMART, iDRAC sensors, local Linux disks, and local or remote NVIDIA GPUs.
 
 > [!CAUTION]
 > This program temporarily overrides Dell's automatic fan control. During initial setup, keep the iDRAC Web UI or a physical console available. Verify `manual`, `restore`, and `diagnose` before running `auto` for an extended period. If the server overheats, readings become unreliable, or behavior is abnormal, run `restore` immediately and stop the container.
@@ -21,11 +21,12 @@ flowchart LR
     CTRL --> IPMI[iDRAC / IPMI\nfan raw command]
     CTRL --> ESXI[ESXi\nesxcli SMART]
     CTRL --> SDR[iDRAC\nTemperature SDR]
-    CTRL --> GPU[NVIDIA\nnvidia-smi]
+    CTRL --> DISK[Linux disks\nsmartctl JSON]
+    CTRL --> GPU[Local/remote NVIDIA\nnvidia-smi]
     CTRL --> LOG[logs/fan_control.log\nhealthcheck]
 ```
 
-The controller sends fan commands only to iDRAC; all temperature sources are read-only. When multiple sources are enabled, it uses the highest valid decision temperature. The GPU reading is adjusted by `GPU_TEMP_OFFSET` first, preventing the GPU package temperature from driving chassis fans unnecessarily fast.
+The controller sends fan commands only to iDRAC; all temperature sources are read-only. Every provider implements the same `validate`, `collect`, and `adjust` interface. When multiple sources are enabled, the controller uses the highest valid adjusted temperature. GPU and disk offsets let unlike sensors share one fan curve without source-specific decision code.
 
 ![iDRAC IPMI over LAN settings](images/image.png)
 
@@ -50,12 +51,14 @@ The main menu looks like this. Each submenu writes changes back to `.env`, and t
 
   1) Quick setup wizard       6) Safety, timing, and logging
   2) iDRAC / IPMI settings    7) Review redacted configuration
-  3) Temperature source       8) Validate configuration
-  4) ESXi NVMe source         9) Run read-only diagnostics
-  5) Fan curve                0) Save and exit
+  3) Temperature source       8) Safety, timing, and logging
+  4) ESXi NVMe source         9) Review redacted configuration
+  5) Local Linux disks       10) Validate configuration
+  6) Remote NVIDIA GPUs      11) Run read-only diagnostics
+  7) Fan curve                0) Save and exit
 ```
 
-For your first setup, select `iDRAC sensors only` and leave ESXi and GPU sources disabled. After completing the TUI, run:
+For your first setup, select `iDRAC sensors only` and leave external sources disabled. After completing the TUI, run:
 
 ```bash
 make validate
@@ -125,7 +128,7 @@ src/FanControlWithEsxiSmart.sh diagnose
 src/FanControlWithEsxiSmart.sh config
 ```
 
-Local execution requires `bash`, `coreutils`, `ipmitool`, and `timeout`. ESXi password authentication also requires `sshpass`. The Docker image includes these dependencies.
+Local execution requires `bash`, `coreutils`, `ipmitool`, and `timeout`. Linux disk mode also requires `smartctl` and `jq`; SSH password authentication requires `sshpass`. The Docker image includes these dependencies.
 
 ## Safe startup sequence
 
@@ -157,13 +160,15 @@ Before unattended operation, confirm each item:
 
 ## Temperature sources and control decisions
 
-`TEMPERATURE_SOURCES` is a comma-separated list containing `esxi`, `idrac`, and/or `gpu`. Sources can be combined, and the controller retains each source label for logging and diagnostics.
+`TEMPERATURE_SOURCES` is a comma-separated list containing `esxi`, `idrac`, `gpu`, `linux_disk`, and/or `remote_gpu`. Sources can be combined, and the controller retains each source label for logging and diagnostics. See [Temperature source interface](docs/TEMPERATURE_SOURCES.md) for the extension contract and deployment examples.
 
 | Source | Reading | Requirements | Behavior on failure |
 | --- | --- | --- | --- |
 | `idrac` | Readable sensors from `ipmitool sdr type Temperature` | iDRAC IPMI | Marks this source as failed |
 | `esxi` | `esxcli storage core device smart get` for the configured NVMe device | SSH and `DRIVE_DEVICE` | Marks this source as failed |
-| `gpu` | Temperature of each GPU reported by `nvidia-smi` | NVIDIA Container Toolkit and driver | Marks this source as failed |
+| `gpu` | Temperature of each local GPU reported by `nvidia-smi` | NVIDIA Container Toolkit and driver | Marks this source as failed |
+| `linux_disk` | SMART temperature for each configured Linux device | `smartctl`, `jq`, and device access | Fails unreadable devices; keeps other valid disks |
+| `remote_gpu` | Every GPU reported by `nvidia-smi` on each configured VM | SSH credentials and remote NVIDIA driver | Fails unreachable hosts; keeps other valid VMs |
 
 ```mermaid
 flowchart TD
@@ -191,7 +196,7 @@ The default curve is shown below. `validate` ensures that thresholds are strictl
 | `critical` | `>=80°C` | 60% |
 | `failsafe` | All sources fail | 70% |
 
-Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` degrees below the relevant threshold, preventing repeated speed changes near a boundary. Moving to a higher level is immediate. The adjusted GPU value is `GPU_TEMP - GPU_TEMP_OFFSET`, with a minimum of 0°C.
+Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` degrees below the relevant threshold, preventing repeated speed changes near a boundary. Moving to a higher level is immediate. Each source owns its adjustment: local and remote GPUs subtract their configured offset, Linux disks subtract `LINUX_DISK_TEMP_OFFSET`, and all results have a minimum of 0°C.
 
 ## Configuration reference
 
@@ -214,7 +219,7 @@ Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` deg
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TEMPERATURE_SOURCES` | `esxi` | Comma-separated list of `esxi,idrac,gpu` |
+| `TEMPERATURE_SOURCES` | `esxi` | Comma-separated list of registered source IDs |
 | `WITH_GPU_TEMP` | `false` | Legacy compatibility switch; `true` appends `gpu` |
 | `GPU_TEMP_OFFSET` | `15` | Offset subtracted from GPU temperature |
 | `ESXI_HOST` / `ESXI_USERNAME` | Empty / `root` | ESXi SSH target |
@@ -224,6 +229,13 @@ Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` deg
 | `SSH_CONNECT_TIMEOUT` | `10` | SSH connection timeout in seconds |
 | `SSH_STRICT_HOST_KEY_CHECKING` | `accept-new` | `yes`, `no`, `ask`, or `accept-new` |
 | `DRIVE_DEVICE` | Empty | Full ID returned by `esxcli storage core device list` |
+| `LINUX_DISK_DEVICES` | Empty | Comma-separated Linux device paths, such as `/dev/nvme1,/dev/sdb` |
+| `LINUX_DISK_TEMP_OFFSET` | `0` | Offset subtracted from local disk temperatures |
+| `LINUX_DISK_NOCHECK` | `never` | smartctl power-mode check; `standby` avoids waking sleeping disks |
+| `REMOTE_GPU_HOSTS` | Empty | Comma-separated Linux VM hostnames or addresses |
+| `REMOTE_GPU_USERNAME` / `REMOTE_GPU_SSH_PORT` | `root` / `22` | SSH identity shared by remote GPU hosts |
+| `REMOTE_GPU_PASSWORD` / `REMOTE_GPU_SSH_KEY` | Empty / Empty | Remote GPU SSH authentication; keys are preferred |
+| `REMOTE_GPU_TEMP_OFFSET` | `15` | Offset subtracted from remote GPU temperatures |
 | `IDRAC_SENSOR_INCLUDE_REGEX` | Empty | awk regex used to keep matching sensor names only |
 | `IDRAC_SENSOR_EXCLUDE_REGEX` | `no reading\|disabled\|not readable` | Excludes invalid SDR entries |
 
@@ -241,7 +253,7 @@ Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` deg
 | `LOG_LEVEL` | `INFO` | `DEBUG` adds command and source details but never logs passwords |
 | `HEALTHCHECK_MAX_AGE` | `0` | `0` means `CHECK_INTERVAL*3 + COMMAND_TIMEOUT` |
 
-## Docker deployment and GPU support
+## Docker deployment, Linux disks, and GPUs
 
 The Compose configuration uses the GHCR image, host networking, and a `./logs` volume by default:
 
@@ -273,6 +285,17 @@ If GPU support is unnecessary, build locally without CUDA to reduce the image si
 ```bash
 docker build --build-arg BASE_IMAGE=ubuntu:24.04 -t idrac-fan-control:local .
 ```
+
+Linux disk mode needs a device mapping for every entry in `LINUX_DISK_DEVICES`. For example:
+
+```yaml
+services:
+  idrac-fan-control:
+    devices:
+      - /dev/nvme1:/dev/nvme1
+```
+
+For a TrueNAS CD6 plus NVIDIA GPUs in other VMs, use `TEMPERATURE_SOURCES=linux_disk,remote_gpu`, map the CD6 controller device, and mount a read-only SSH key for the GPU VMs. The complete example is in [docs/TEMPERATURE_SOURCES.md](docs/TEMPERATURE_SOURCES.md).
 
 ## Debugging, logs, and troubleshooting
 
@@ -312,7 +335,7 @@ docker compose run --rm idrac-fan-control diagnose
 ## Security and backups
 
 - Never commit `.env`, `logs/`, private keys, or incident dumps. The TUI sets configuration file permissions to `600`.
-- Compose mounts the gitignored `./secrets` directory read-only at `/run/secrets`. Use the in-container path for ESXi keys, such as `/run/secrets/esxi_ed25519`.
+- Compose mounts the gitignored `./secrets` directory read-only at `/run/secrets`. Use in-container paths such as `/run/secrets/esxi_ed25519` or `/run/secrets/gpu_vms_ed25519`.
 - Prefer `ESXI_SSH_KEY`. When password authentication is required, the controller uses the `SSHPASS` environment variable with `sshpass -e`, keeping the password out of argv.
 - The iDRAC password is supplied through the `IPMI_PASSWORD` environment variable and `ipmitool -E`. The `config` command and TUI review show only whether it is set and its character count.
 - Keep iDRAC and ESXi on an isolated management network. Never expose IPMI over LAN to the public internet.
@@ -331,13 +354,13 @@ Copy the complete identifier into `DRIVE_DEVICE`; do not shorten it. If the SMAR
 ## Testing and quality gates
 
 ```bash
-make test             # bash -n + 37 core assertions + 10 TUI assertions
+make test             # bash -n + 52 core assertions + 14 TUI assertions
 make validate         # Check the current .env with Docker dependencies; does not change fans
 make validate-example # DRY_RUN smoke test that does not require .env
 make docker-build
 ```
 
-Tests cover source normalization, SDR parsing, GPU offset, hysteresis, fail-safe behavior, curve/port/regex validation, credential redaction, health freshness, diagnostic previews, and safe round-tripping of TUI configuration files. Real hardware, ESXi SSH, and GPUs must still be verified with `diagnose` on your management network.
+Tests cover the source interface, Linux SMART collection, multi-host remote GPUs, source offsets, SDR parsing, hysteresis, fail-safe behavior, configuration validation, credential redaction, health freshness, diagnostics, and safe TUI configuration round-trips. Real hardware, SSH targets, disks, iDRAC, and GPUs must still be verified with `diagnose` on your management network.
 
 ## Project structure
 
@@ -351,6 +374,7 @@ Tests cover source normalization, SDR parsing, GPU offset, hysteresis, fail-safe
 │   ├── fan-control.test.sh          # Core logic and safety tests
 │   └── tui.test.sh                  # .env parser/writer tests
 ├── docs/
+│   ├── TEMPERATURE_SOURCES.md        # Source interface and deployment examples
 │   └── TROUBLESHOOTING.md           # Symptom-based troubleshooting guide
 ├── images/image.png                 # iDRAC IPMI settings screenshot
 ├── .env.example                     # Fully commented configuration template
@@ -364,10 +388,10 @@ Tests cover source normalization, SDR parsing, GPU offset, hysteresis, fail-safe
 
 ## Compatibility and limitations
 
-The project primarily targets Dell PowerEdge R730/R730xd-class systems with iDRAC 8 OEM fan raw commands. Other generations may be compatible, but identical behavior must not be assumed. Complete `manual`, `restore`, and `diagnose` checks before unattended operation. Actual iDRAC, ESXi, and GPU sensor names and permissions vary by firmware and driver, so rely on diagnostic output from your own environment.
+The project primarily targets Dell PowerEdge R730/R730xd-class systems with iDRAC 8 OEM fan raw commands. Other generations may be compatible, but identical behavior must not be assumed. Complete `manual`, `restore`, and `diagnose` checks before unattended operation. Sensor names, disk permissions, SSH access, and driver behavior vary by environment, so rely on diagnostic output from your own deployment.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
 
-Documentation last reviewed: July 18, 2026.
+Documentation last reviewed: August 15, 2026.

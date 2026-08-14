@@ -22,6 +22,17 @@ PROGRAM_NAME="$(basename "$0")"
 : "${SSH_STRICT_HOST_KEY_CHECKING:=accept-new}"
 : "${DRIVE_DEVICE:=}"
 
+: "${LINUX_DISK_DEVICES:=}"
+: "${LINUX_DISK_TEMP_OFFSET:=0}"
+: "${LINUX_DISK_NOCHECK:=never}"
+
+: "${REMOTE_GPU_HOSTS:=}"
+: "${REMOTE_GPU_USERNAME:=root}"
+: "${REMOTE_GPU_PASSWORD:=}"
+: "${REMOTE_GPU_SSH_KEY:=}"
+: "${REMOTE_GPU_SSH_PORT:=22}"
+: "${REMOTE_GPU_TEMP_OFFSET:=15}"
+
 : "${OPERATION_MODE:=manual}"
 : "${TEMPERATURE_SOURCES:=esxi}"
 : "${WITH_GPU_TEMP:=false}"
@@ -53,6 +64,9 @@ PROGRAM_NAME="$(basename "$0")"
 : "${LOG_LEVEL:=INFO}"
 : "${HEALTHCHECK_MAX_AGE:=0}"
 : "${DRY_RUN:=false}"
+
+readonly TEMPERATURE_SOURCE_INTERFACE_VERSION=1
+readonly TEMPERATURE_SOURCE_IDS="esxi idrac gpu linux_disk remote_gpu"
 
 LAST_LEVEL=""
 LAST_SPEED=""
@@ -234,6 +248,57 @@ source_enabled_in_list() {
     return 1
 }
 
+normalize_csv_list() {
+    local raw="${1:-}"
+    local normalized=""
+    local item
+    local -a items
+
+    IFS=',' read -r -a items <<< "$raw"
+    for item in "${items[@]}"; do
+        item="$(trim "$item")"
+        [[ -z "$item" ]] && continue
+        if ! source_enabled_in_list "$item" "$normalized"; then
+            normalized="${normalized:+${normalized},}${item}"
+        fi
+    done
+
+    printf '%s' "$normalized"
+}
+
+temperature_source_supported() {
+    local wanted="$1"
+    local source
+
+    for source in $TEMPERATURE_SOURCE_IDS; do
+        [[ "$source" == "$wanted" ]] && return 0
+    done
+    return 1
+}
+
+temperature_source_method() {
+    local source="$1"
+    local method="$2"
+    shift 2
+    local function_name="temperature_source_${source}_${method}"
+
+    temperature_source_supported "$source" || return 1
+    declare -F "$function_name" >/dev/null 2>&1 || {
+        log "ERROR" "Temperature source '${source}' does not implement ${method}() for interface v${TEMPERATURE_SOURCE_INTERFACE_VERSION}"
+        return 1
+    }
+    "$function_name" "$@"
+}
+
+temperature_source_interface_complete() {
+    local source="$1"
+    local method
+
+    for method in validate collect adjust; do
+        declare -F "temperature_source_${source}_${method}" >/dev/null 2>&1 || return 1
+    done
+}
+
 command_needs_ipmi() {
     case "$1" in
         auto|once|manual|restore|status|diagnose) return 0 ;;
@@ -267,19 +332,19 @@ validate_sources() {
 
     sources="$(normalize_sources)"
     if [[ -z "$sources" ]]; then
-        log "ERROR" "TEMPERATURE_SOURCES must contain at least one source: esxi, idrac, gpu"
+        log "ERROR" "TEMPERATURE_SOURCES must contain at least one source: ${TEMPERATURE_SOURCE_IDS// /, }"
         return 1
     fi
 
     IFS=',' read -r -a source_list <<< "$sources"
     for source in "${source_list[@]}"; do
-        case "$source" in
-            esxi|idrac|gpu) ;;
-            *)
-                log "ERROR" "Unsupported temperature source '${source}'. Use esxi, idrac, or gpu."
-                error=1
-                ;;
-        esac
+        if ! temperature_source_supported "$source"; then
+            log "ERROR" "Unsupported temperature source '${source}'. Use ${TEMPERATURE_SOURCE_IDS// /, }."
+            error=1
+        elif ! temperature_source_interface_complete "$source"; then
+            log "ERROR" "Temperature source '${source}' has an incomplete interface"
+            error=1
+        fi
     done
 
     return "$error"
@@ -332,7 +397,10 @@ validate_config() {
         validate_integer_range "CHECK_INTERVAL" "$CHECK_INTERVAL" 1 86400 || error=1
         validate_integer_range "SSH_CONNECT_TIMEOUT" "$SSH_CONNECT_TIMEOUT" 1 300 || error=1
         validate_integer_range "ESXI_SSH_PORT" "$ESXI_SSH_PORT" 1 65535 || error=1
+        validate_integer_range "REMOTE_GPU_SSH_PORT" "$REMOTE_GPU_SSH_PORT" 1 65535 || error=1
         validate_integer_range "GPU_TEMP_OFFSET" "$GPU_TEMP_OFFSET" 0 120 || error=1
+        validate_integer_range "LINUX_DISK_TEMP_OFFSET" "$LINUX_DISK_TEMP_OFFSET" 0 120 || error=1
+        validate_integer_range "REMOTE_GPU_TEMP_OFFSET" "$REMOTE_GPU_TEMP_OFFSET" 0 120 || error=1
         validate_integer_range "HYSTERESIS" "$HYSTERESIS" 0 30 || error=1
         validate_integer_range "HEALTHCHECK_MAX_AGE" "$HEALTHCHECK_MAX_AGE" 0 86400 || error=1
 
@@ -389,39 +457,12 @@ validate_config() {
     if command_needs_temperature "$command"; then
         validate_sources || error=1
         sources="$(normalize_sources)"
-
-        if source_enabled_in_list "esxi" "$sources"; then
-            require_value "ESXI_HOST" "$ESXI_HOST" || error=1
-            require_value "ESXI_USERNAME" "$ESXI_USERNAME" || error=1
-            require_value "DRIVE_DEVICE" "$DRIVE_DEVICE" || error=1
-            if [[ -z "$ESXI_PASSWORD" && -z "$ESXI_SSH_KEY" ]]; then
-                log "ERROR" "Set ESXI_PASSWORD or ESXI_SSH_KEY when TEMPERATURE_SOURCES includes esxi"
-                error=1
-            fi
-            if [[ -z "$ESXI_SSH_KEY" ]]; then
-                require_value "ESXI_PASSWORD" "$ESXI_PASSWORD" || error=1
-            elif is_placeholder_value "$ESXI_SSH_KEY"; then
-                log "ERROR" "Replace placeholder value for ESXI_SSH_KEY"
-                error=1
-            fi
-            if [[ -n "$ESXI_SSH_KEY" && ! -r "$ESXI_SSH_KEY" ]]; then
-                log "ERROR" "ESXI_SSH_KEY is not readable: ${ESXI_SSH_KEY}"
-                error=1
-            fi
-            if ! is_true "$DRY_RUN"; then
-                require_command "ssh" || error=1
-                require_command "timeout" || error=1
-                if [[ -n "$ESXI_PASSWORD" && -z "$ESXI_SSH_KEY" ]]; then
-                    require_command "sshpass" || error=1
-                fi
-            fi
-        fi
-
-        if source_enabled_in_list "gpu" "$sources" && ! is_true "$DRY_RUN"; then
-            if ! command -v nvidia-smi >/dev/null 2>&1; then
-                log "WARN" "GPU source is enabled but nvidia-smi is not available; fail-safe will be used if no other source succeeds"
-            fi
-        fi
+        local source
+        local -a source_list
+        IFS=',' read -r -a source_list <<< "$sources"
+        for source in "${source_list[@]}"; do
+            temperature_source_method "$source" validate || error=1
+        done
     fi
 
     return "$error"
@@ -468,22 +509,33 @@ remote_quote() {
     printf "'%s'" "${value//\'/\'\\\'\'}"
 }
 
-run_esxi_command() {
-    local remote_command="$1"
-    local ssh_command=(ssh -p "$ESXI_SSH_PORT" -o "StrictHostKeyChecking=${SSH_STRICT_HOST_KEY_CHECKING}" -o "ConnectTimeout=${SSH_CONNECT_TIMEOUT}")
+run_ssh_command() {
+    local context="$1"
+    local host="$2"
+    local username="$3"
+    local password="$4"
+    local key="$5"
+    local port="$6"
+    local remote_command="$7"
+    local ssh_command=(ssh -p "$port" -o "StrictHostKeyChecking=${SSH_STRICT_HOST_KEY_CHECKING}" -o "ConnectTimeout=${SSH_CONNECT_TIMEOUT}")
 
-    if [[ -n "$ESXI_SSH_KEY" ]]; then
-        ssh_command+=(-i "$ESXI_SSH_KEY" -o BatchMode=yes)
+    if [[ -n "$key" ]]; then
+        ssh_command+=(-i "$key" -o BatchMode=yes)
     fi
 
-    ssh_command+=("${ESXI_USERNAME}@${ESXI_HOST}" "$remote_command")
-    log "DEBUG" "Running ESXi command against ${ESXI_HOST}:${ESXI_SSH_PORT} as ${ESXI_USERNAME}"
+    ssh_command+=("${username}@${host}" "$remote_command")
+    log "DEBUG" "Running ${context} SSH query against ${host}:${port} as ${username}"
 
-    if [[ -n "$ESXI_PASSWORD" && -z "$ESXI_SSH_KEY" ]]; then
-        SSHPASS="$ESXI_PASSWORD" timeout "$COMMAND_TIMEOUT" sshpass -e "${ssh_command[@]}"
+    if [[ -n "$password" && -z "$key" ]]; then
+        SSHPASS="$password" timeout "$COMMAND_TIMEOUT" sshpass -e "${ssh_command[@]}"
     else
         timeout "$COMMAND_TIMEOUT" "${ssh_command[@]}"
     fi
+}
+
+run_esxi_command() {
+    run_ssh_command "ESXi" "$ESXI_HOST" "$ESXI_USERNAME" "$ESXI_PASSWORD" \
+        "$ESXI_SSH_KEY" "$ESXI_SSH_PORT" "$1"
 }
 
 get_esxi_drive_temperature() {
@@ -567,9 +619,6 @@ get_idrac_temperatures() {
 
 get_gpu_temperatures() {
     local output
-    local index
-    local temp
-    local found=1
 
     command -v nvidia-smi >/dev/null 2>&1 || return 1
 
@@ -578,17 +627,228 @@ get_gpu_temperatures() {
         return 1
     fi
 
+    parse_nvidia_smi_temperatures "gpu" "" <<< "$output"
+}
+
+parse_nvidia_smi_temperatures() {
+    local source="$1"
+    local label_prefix="$2"
+    local index
+    local temp
+    local found=1
+
     while IFS=',' read -r index temp; do
         index="$(trim "$index")"
         temp="$(trim "$temp")"
         if is_integer "$temp"; then
-            printf 'gpu\tgpu%s\t%s\n' "$index" "$temp"
+            printf '%s\t%sgpu%s\t%s\n' "$source" "$label_prefix" "$index" "$temp"
             found=0
         fi
-    done <<< "$output"
+    done
 
     return "$found"
 }
+
+parse_smartctl_temperature() {
+    jq -er '
+        [
+            .temperature.current?,
+            .nvme_smart_health_information_log.temperature?,
+            (
+                .ata_smart_attributes.table[]?
+                | select((.name // "" | ascii_downcase) | contains("temperature"))
+                | .raw.value?
+            )
+        ]
+        | map(if type == "string" then (tonumber? // empty) else . end)
+        | map(select(type == "number"))
+        | (.[0] // empty)
+        | round
+    ' 2>/dev/null
+}
+
+get_linux_disk_temperatures() {
+    local devices
+    local device
+    local output
+    local status
+    local temp
+    local label
+    local found=1
+    local -a device_list
+
+    devices="$(normalize_csv_list "$LINUX_DISK_DEVICES")"
+    IFS=',' read -r -a device_list <<< "$devices"
+    for device in "${device_list[@]}"; do
+        status=0
+        output="$(timeout "$COMMAND_TIMEOUT" smartctl -n "$LINUX_DISK_NOCHECK" -A -j "$device" 2>/dev/null)" || status=$?
+        if (( status == 124 )); then
+            log "WARN" "Linux disk SMART query timed out for ${device}"
+            continue
+        fi
+
+        if ! temp="$(parse_smartctl_temperature <<< "$output")" || ! is_integer "$temp"; then
+            log "WARN" "Linux disk SMART output contained no temperature for ${device} (smartctl status ${status})"
+            continue
+        fi
+
+        label="${device#/dev/}"
+        printf 'linux_disk\t%s\t%s\n' "$label" "$temp"
+        found=0
+    done
+
+    return "$found"
+}
+
+get_remote_gpu_temperatures() {
+    local hosts
+    local host
+    local output
+    local found=1
+    local -a host_list
+    local remote_command='nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader,nounits'
+
+    hosts="$(normalize_csv_list "$REMOTE_GPU_HOSTS")"
+    IFS=',' read -r -a host_list <<< "$hosts"
+    for host in "${host_list[@]}"; do
+        if output="$(run_ssh_command "remote GPU" "$host" "$REMOTE_GPU_USERNAME" \
+            "$REMOTE_GPU_PASSWORD" "$REMOTE_GPU_SSH_KEY" "$REMOTE_GPU_SSH_PORT" "$remote_command")" \
+            && parse_nvidia_smi_temperatures "remote_gpu" "${host}/" <<< "$output"; then
+            found=0
+        else
+            log "WARN" "Remote NVIDIA temperature query failed for ${host}"
+        fi
+    done
+
+    return "$found"
+}
+
+apply_temperature_offset() {
+    local temp="$1"
+    local offset="$2"
+    local adjusted=$((temp - offset))
+    (( adjusted < 0 )) && adjusted=0
+    printf '%s' "$adjusted"
+}
+
+temperature_source_esxi_validate() {
+    local error=0
+
+    require_value "ESXI_HOST" "$ESXI_HOST" || error=1
+    require_value "ESXI_USERNAME" "$ESXI_USERNAME" || error=1
+    require_value "DRIVE_DEVICE" "$DRIVE_DEVICE" || error=1
+    if [[ -z "$ESXI_PASSWORD" && -z "$ESXI_SSH_KEY" ]]; then
+        log "ERROR" "Set ESXI_PASSWORD or ESXI_SSH_KEY when TEMPERATURE_SOURCES includes esxi"
+        error=1
+    elif [[ -z "$ESXI_SSH_KEY" ]]; then
+        require_value "ESXI_PASSWORD" "$ESXI_PASSWORD" || error=1
+    elif is_placeholder_value "$ESXI_SSH_KEY"; then
+        log "ERROR" "Replace placeholder value for ESXI_SSH_KEY"
+        error=1
+    elif [[ ! -r "$ESXI_SSH_KEY" ]]; then
+        log "ERROR" "ESXI_SSH_KEY is not readable: ${ESXI_SSH_KEY}"
+        error=1
+    fi
+    if ! is_true "$DRY_RUN"; then
+        require_command "ssh" || error=1
+        require_command "timeout" || error=1
+        if [[ -n "$ESXI_PASSWORD" && -z "$ESXI_SSH_KEY" ]]; then
+            require_command "sshpass" || error=1
+        fi
+    fi
+    return "$error"
+}
+
+temperature_source_esxi_collect() { get_esxi_drive_temperature; }
+temperature_source_esxi_adjust() { printf '%s' "$1"; }
+
+temperature_source_idrac_validate() { return 0; }
+temperature_source_idrac_collect() { get_idrac_temperatures; }
+temperature_source_idrac_adjust() { printf '%s' "$1"; }
+
+temperature_source_gpu_validate() {
+    if ! is_true "$DRY_RUN" && ! command -v nvidia-smi >/dev/null 2>&1; then
+        log "WARN" "GPU source is enabled but nvidia-smi is unavailable; fail-safe will be used if no other source succeeds"
+    fi
+}
+temperature_source_gpu_collect() { get_gpu_temperatures; }
+temperature_source_gpu_adjust() { apply_temperature_offset "$1" "$GPU_TEMP_OFFSET"; }
+
+temperature_source_linux_disk_validate() {
+    local devices
+    local device
+    local error=0
+    local -a device_list
+
+    require_value "LINUX_DISK_DEVICES" "$LINUX_DISK_DEVICES" || return 1
+    devices="$(normalize_csv_list "$LINUX_DISK_DEVICES")"
+    IFS=',' read -r -a device_list <<< "$devices"
+    for device in "${device_list[@]}"; do
+        if [[ ! "$device" =~ ^/dev/[A-Za-z0-9._/+:-]+$ ]]; then
+            log "ERROR" "LINUX_DISK_DEVICES contains an invalid device path: ${device}"
+            error=1
+        fi
+    done
+    case "$LINUX_DISK_NOCHECK" in
+        never|sleep|standby|idle) ;;
+        *)
+            log "ERROR" "LINUX_DISK_NOCHECK must be never, sleep, standby, or idle"
+            error=1
+            ;;
+    esac
+    if ! is_true "$DRY_RUN"; then
+        require_command "smartctl" || error=1
+        require_command "jq" || error=1
+        require_command "timeout" || error=1
+    fi
+    return "$error"
+}
+temperature_source_linux_disk_collect() { get_linux_disk_temperatures; }
+temperature_source_linux_disk_adjust() { apply_temperature_offset "$1" "$LINUX_DISK_TEMP_OFFSET"; }
+
+temperature_source_remote_gpu_validate() {
+    local hosts
+    local host
+    local error=0
+    local -a host_list
+
+    require_value "REMOTE_GPU_HOSTS" "$REMOTE_GPU_HOSTS" || error=1
+    require_value "REMOTE_GPU_USERNAME" "$REMOTE_GPU_USERNAME" || error=1
+    hosts="$(normalize_csv_list "$REMOTE_GPU_HOSTS")"
+    IFS=',' read -r -a host_list <<< "$hosts"
+    for host in "${host_list[@]}"; do
+        if [[ ! "$host" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            log "ERROR" "REMOTE_GPU_HOSTS contains an invalid hostname or address: ${host}"
+            error=1
+        fi
+    done
+    if [[ ! "$REMOTE_GPU_USERNAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        log "ERROR" "REMOTE_GPU_USERNAME contains unsupported characters"
+        error=1
+    fi
+    if [[ -z "$REMOTE_GPU_PASSWORD" && -z "$REMOTE_GPU_SSH_KEY" ]]; then
+        log "ERROR" "Set REMOTE_GPU_PASSWORD or REMOTE_GPU_SSH_KEY when TEMPERATURE_SOURCES includes remote_gpu"
+        error=1
+    elif [[ -z "$REMOTE_GPU_SSH_KEY" ]]; then
+        require_value "REMOTE_GPU_PASSWORD" "$REMOTE_GPU_PASSWORD" || error=1
+    elif is_placeholder_value "$REMOTE_GPU_SSH_KEY"; then
+        log "ERROR" "Replace placeholder value for REMOTE_GPU_SSH_KEY"
+        error=1
+    elif [[ ! -r "$REMOTE_GPU_SSH_KEY" ]]; then
+        log "ERROR" "REMOTE_GPU_SSH_KEY is not readable: ${REMOTE_GPU_SSH_KEY}"
+        error=1
+    fi
+    if ! is_true "$DRY_RUN"; then
+        require_command "ssh" || error=1
+        require_command "timeout" || error=1
+        if [[ -n "$REMOTE_GPU_PASSWORD" && -z "$REMOTE_GPU_SSH_KEY" ]]; then
+            require_command "sshpass" || error=1
+        fi
+    fi
+    return "$error"
+}
+temperature_source_remote_gpu_collect() { get_remote_gpu_temperatures; }
+temperature_source_remote_gpu_adjust() { apply_temperature_offset "$1" "$REMOTE_GPU_TEMP_OFFSET"; }
 
 collect_temperature_readings() {
     local sources
@@ -602,32 +862,12 @@ collect_temperature_readings() {
 
     for source in "${source_list[@]}"; do
         log "DEBUG" "Collecting temperature source: ${source}"
-        case "$source" in
-            esxi)
-                if output="$(get_esxi_drive_temperature)"; then
-                    printf '%s\n' "$output"
-                    found=0
-                else
-                    log "WARN" "ESXi drive temperature read failed"
-                fi
-                ;;
-            idrac)
-                if output="$(get_idrac_temperatures)"; then
-                    printf '%s\n' "$output"
-                    found=0
-                else
-                    log "WARN" "iDRAC temperature sensor read failed"
-                fi
-                ;;
-            gpu)
-                if output="$(get_gpu_temperatures)"; then
-                    printf '%s\n' "$output"
-                    found=0
-                else
-                    log "WARN" "GPU temperature read failed"
-                fi
-                ;;
-        esac
+        if output="$(temperature_source_method "$source" collect)"; then
+            printf '%s\n' "$output"
+            found=0
+        else
+            log "WARN" "Temperature source '${source}' read failed"
+        fi
     done
 
     return "$found"
@@ -646,10 +886,11 @@ calculate_decision_temperature() {
         [[ -z "${source:-}" || -z "${temp:-}" ]] && continue
         is_integer "$temp" || continue
 
-        adjusted="$temp"
-        if [[ "$source" == "gpu" ]]; then
-            adjusted=$(( temp - GPU_TEMP_OFFSET ))
-            (( adjusted < 0 )) && adjusted=0
+        if ! adjusted="$(temperature_source_method "$source" adjust "$temp")" || ! is_integer "$adjusted"; then
+            log "WARN" "Temperature source '${source}' returned an invalid adjusted value for ${label}"
+            continue
+        fi
+        if [[ "$adjusted" != "$temp" ]]; then
             detail_text="${detail_text:+${detail_text}, }${source}:${label}=${temp}C(adjusted=${adjusted}C)"
         else
             detail_text="${detail_text:+${detail_text}, }${source}:${label}=${temp}C"
@@ -895,8 +1136,10 @@ config_row() {
 
 print_effective_config() {
     local esxi_auth="password"
+    local remote_gpu_auth="password"
 
     [[ -n "$ESXI_SSH_KEY" ]] && esxi_auth="ssh-key"
+    [[ -n "$REMOTE_GPU_SSH_KEY" ]] && remote_gpu_auth="ssh-key"
 
     printf 'Effective configuration (credentials are never printed)\n'
     printf '%s\n' '------------------------------------------------------------'
@@ -908,6 +1151,11 @@ print_effective_config() {
     config_row "ESXi authentication" "$esxi_auth"
     config_row "ESXi password" "$(credential_state "$ESXI_PASSWORD")"
     config_row "ESXi drive" "${DRIVE_DEVICE:-not set}"
+    config_row "Linux disks" "${LINUX_DISK_DEVICES:-not set} (offset=${LINUX_DISK_TEMP_OFFSET} C, nocheck=${LINUX_DISK_NOCHECK})"
+    config_row "Remote GPU targets" "${REMOTE_GPU_USERNAME}@${REMOTE_GPU_HOSTS:-not set}:${REMOTE_GPU_SSH_PORT}"
+    config_row "Remote GPU authentication" "$remote_gpu_auth"
+    config_row "Remote GPU password" "$(credential_state "$REMOTE_GPU_PASSWORD")"
+    config_row "GPU offsets" "local=${GPU_TEMP_OFFSET} C, remote=${REMOTE_GPU_TEMP_OFFSET} C"
     config_row "Fan thresholds" "${TEMP_LOW}/${TEMP_MEDIUM}/${TEMP_HIGH}/${TEMP_CRITICAL} C"
     config_row "Fan speeds" "${FAN_SPEED_IDLE}/${FAN_SPEED_LOW}/${FAN_SPEED_MEDIUM}/${FAN_SPEED_HIGH}/${FAN_SPEED_CRITICAL}%"
     config_row "Hysteresis" "${HYSTERESIS} C"
@@ -978,11 +1226,7 @@ diagnose_mode() {
     IFS=',' read -r -a source_list <<< "$sources"
     for source in "${source_list[@]}"; do
         output=""
-        case "$source" in
-            esxi) output="$(get_esxi_drive_temperature)" || true ;;
-            idrac) output="$(get_idrac_temperatures)" || true ;;
-            gpu) output="$(get_gpu_temperatures)" || true ;;
-        esac
+        output="$(temperature_source_method "$source" collect)" || true
 
         if [[ -n "$output" ]]; then
             diagnostic_row "PASS" "source:${source}" "$(reading_summary "$output")"
