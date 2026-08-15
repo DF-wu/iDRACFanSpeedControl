@@ -147,7 +147,7 @@ docker compose run --rm --entrypoint sh idrac-fan-control -c \
   'ls -l /dev/nvme1 && smartctl -A -j /dev/nvme1 | jq .temperature'
 ```
 
-Host 成功、容器失敗通常代表 `docker-compose.yml` 未加入 `/dev/nvme1:/dev/nvme1`。`LINUX_DISK_DEVICES` 必須是 `/dev/...` 逗號清單；控制器會拒絕空白、shell metacharacter 與相對路徑。smartctl 的非零狀態可能是 SMART health bitmask，因此只要 JSON 仍含有效溫度，控制器會保留該讀值；timeout、無效 JSON 或沒有溫度才使該 device 失敗。
+Host 成功、容器失敗通常代表 `docker-compose.yml` 未加入 `/dev/nvme1:/dev/nvme1`。`LINUX_DISK_DEVICES` 必須是 `/dev/...` 逗號清單；控制器會拒絕空白、shell metacharacter、相對路徑，以及含 `.`、`..` 或空元件的路徑。smartctl 的非零狀態可能是 SMART health bitmask，因此只要 JSON 仍含有效溫度，控制器會保留該讀值；timeout、無效 JSON 或沒有溫度才使該 device 失敗。
 
 ## NVIDIA GPU 深入檢查
 

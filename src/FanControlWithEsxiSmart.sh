@@ -774,6 +774,22 @@ temperature_source_gpu_validate() {
 temperature_source_gpu_collect() { get_gpu_temperatures; }
 temperature_source_gpu_adjust() { apply_temperature_offset "$1" "$GPU_TEMP_OFFSET"; }
 
+is_linux_device_path() {
+    local path="$1"
+    local relative
+    local component
+    local -a components
+
+    [[ "$path" =~ ^/dev/[A-Za-z0-9._+:/-]+$ ]] || return 1
+    relative="${path#/dev/}"
+    [[ -n "$relative" && "$relative" != */ && "$relative" != *//* ]] || return 1
+
+    IFS='/' read -r -a components <<< "$relative"
+    for component in "${components[@]}"; do
+        [[ "$component" != "." && "$component" != ".." ]] || return 1
+    done
+}
+
 temperature_source_linux_disk_validate() {
     local devices
     local device
@@ -784,7 +800,7 @@ temperature_source_linux_disk_validate() {
     devices="$(normalize_csv_list "$LINUX_DISK_DEVICES")"
     IFS=',' read -r -a device_list <<< "$devices"
     for device in "${device_list[@]}"; do
-        if [[ ! "$device" =~ ^/dev/[A-Za-z0-9._/+:-]+$ ]]; then
+        if ! is_linux_device_path "$device"; then
             log "ERROR" "LINUX_DISK_DEVICES contains an invalid device path: ${device}"
             error=1
         fi

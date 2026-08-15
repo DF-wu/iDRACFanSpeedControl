@@ -267,6 +267,32 @@ test_linux_and_remote_sources_validate_configuration() {
         IDRAC_IP=10.0.0.10
         IDRAC_ID=root
         IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES=/dev/../etc/passwd
+        validate_config auto >/dev/null 2>&1
+    ) && fail "validate_config should reject parent traversal in Linux device paths"
+    pass
+
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES=/dev/disk/by-id/nvme-KIOXIA_CD6
+        validate_config auto >/dev/null 2>&1
+    ) || fail "validate_config should accept nested Linux device paths"
+    pass
+
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
         LINUX_DISK_DEVICES=/dev/sdb
         LINUX_DISK_NOCHECK=invalid
         validate_config auto >/dev/null 2>&1

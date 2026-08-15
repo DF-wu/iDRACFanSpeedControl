@@ -38,7 +38,7 @@ Labels must not contain tabs or newlines. A source must reject missing, malforme
 
 ## Linux disk behavior
 
-Set `LINUX_DISK_DEVICES` to comma-separated `/dev` paths. For NVMe, prefer the controller node such as `/dev/nvme1`; namespace paths such as `/dev/nvme1n1` also work when smartctl supports them.
+Set `LINUX_DISK_DEVICES` to comma-separated `/dev` paths. Each path must contain only regular device-name components; the controller rejects empty, `.` and `..` components to prevent traversal outside `/dev`. Nested paths such as `/dev/disk/by-id/...` remain valid. For NVMe, prefer the controller node such as `/dev/nvme1`; namespace paths such as `/dev/nvme1n1` also work when smartctl supports them.
 
 The parser first reads smartctl's generic `temperature.current`, then checks the NVMe health log and ATA temperature attributes. It accepts a valid temperature even when smartctl's exit status reports disk health bits. A timeout, invalid JSON, inaccessible device, or absent temperature fails that device only. Set `LINUX_DISK_NOCHECK=standby` to avoid waking sleeping SATA/SAS disks; keep the default `never` for always-on devices such as the CD6.
 
