@@ -8,6 +8,10 @@ services:
       - ./logs:/var/log/fan-control
       # Put an ESXi private key in ./secrets and use /run/secrets/<name> in .env.
       - ./secrets:/run/secrets:ro
+    # Map each device listed in LINUX_DISK_DEVICES. Device mappings grant raw
+    # hardware access, so expose only the disks used by the controller.
+    # devices:
+    #   - /dev/nvme1:/dev/nvme1
     network_mode: host
     restart: unless-stopped
     init: true

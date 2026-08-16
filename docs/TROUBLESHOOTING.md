@@ -36,7 +36,7 @@ docker logs --tail 200 idrac-fan-control
 tail -n 200 logs/fan_control.log
 ```
 
-需要命令階段與來源選擇細節時，在 `.env` 設 `LOG_LEVEL=DEBUG` 後重跑 `diagnose`。Debug log 不會列出 iDRAC／ESXi 密碼；提交 issue 前仍應檢查主機名稱、IP、device identifier 是否需要遮罩。
+需要命令階段與來源選擇細節時，在 `.env` 設 `LOG_LEVEL=DEBUG` 後重跑 `diagnose`。Debug log 不會列出 iDRAC、ESXi 或 remote GPU 密碼；提交 issue 前仍應檢查主機名稱、IP、device identifier 是否需要遮罩。
 
 ## Diagnostic output 怎麼讀
 
@@ -67,6 +67,8 @@ Result: PASS - controller dependencies are ready.
 | `source:idrac ... no valid` | SDR 無 readable temperature 或 regex 過濾全部 | `status`、清空 include regex | 修正 filter；保留預設 exclude |
 | `source:esxi ... no valid` | SSH、device ID 或 SMART 格式錯 | ESXi 上直接跑 `esxcli ... smart get` | 修復 key/password、port、完整 ID |
 | `source:gpu ... no valid` | 容器無 GPU、驅動／Toolkit 未配置 | `docker ... nvidia-smi` | 啟用 `gpus: all` 與 Toolkit，或移除 gpu source |
+| `source:linux_disk ... no valid` | device 未映射、權限不足、SMART 無溫度 | host 與容器內分別執行 `smartctl -A -j` | 加入精確 `devices` mapping，確認 `jq` 與路徑 |
+| `source:remote_gpu ... no valid` | VM 不可達、SSH 認證或遠端 `nvidia-smi` 失敗 | 以相同 key 手動 SSH 執行 query | 修復 host/key/known_hosts/driver，或移除失敗 target |
 | `No valid temperature readings` | 所有 selected sources 都失敗 | `diagnose` | 修復至少一個 source；先保留 fail-safe |
 | `Fail-safe fan speed applied` | 上述全部失敗且 fail-safe 開啟 | 同時看前面的 source WARN | 修復來源；這不是曲線 level |
 | `Fan speeds must not decrease` | 高溫檔位比低溫檔位低 | TUI Review | 讓 idle ≤ low ≤ medium ≤ high ≤ critical |
@@ -130,6 +132,23 @@ ssh -i /path/to/key -o BatchMode=yes root@ESXI_HOST true
 
 容器要使用 host key file 時，還必須把 key 以 read-only volume 掛進 container，且 `.env` 的 `ESXI_SSH_KEY` 要填 container 內路徑；只填 host path 不會自動掛載。
 
+## Linux 磁碟深入檢查
+
+先在 host 上執行與控制器相同的唯讀查詢：
+
+```bash
+sudo smartctl -A -j /dev/nvme1 | jq '.temperature.current // .nvme_smart_health_information_log.temperature'
+```
+
+再確認容器看到同一個 device：
+
+```bash
+docker compose run --rm --entrypoint sh idrac-fan-control -c \
+  'ls -l /dev/nvme1 && smartctl -A -j /dev/nvme1 | jq .temperature'
+```
+
+Host 成功、容器失敗通常代表 `docker-compose.yml` 未加入 `/dev/nvme1:/dev/nvme1`。`LINUX_DISK_DEVICES` 必須是 `/dev/...` 逗號清單；控制器會拒絕空白、shell metacharacter、相對路徑，以及含 `.`、`..` 或空元件的路徑。smartctl 的非零狀態可能是 SMART health bitmask，因此只要 JSON 仍含有效溫度，控制器會保留該讀值；timeout、無效 JSON 或沒有溫度才使該 device 失敗。
+
 ## NVIDIA GPU 深入檢查
 
 ```bash
@@ -139,6 +158,15 @@ docker compose run --rm idrac-fan-control diagnose
 ```
 
 第一個失敗代表主機驅動問題；第一個成功、第二個失敗通常是 Container Toolkit；兩者成功但 Compose 失敗則檢查 `docker-compose.yml` 的 `gpus: all`。不用 GPU 做控制時，最安全的修復是從 `TEMPERATURE_SOURCES` 移除 `gpu`，而不是把錯誤隱藏。
+
+遠端 GPU 來源請從 controller host 或容器測試完全相同的命令：
+
+```bash
+ssh -i /run/secrets/gpu_vms_ed25519 monitor@gpu-vm-1 \
+  'nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader,nounits'
+```
+
+若互動式 SSH 成功但 controller 失敗，檢查 key 的容器內路徑、`REMOTE_GPU_USERNAME`、port 與 `SSH_STRICT_HOST_KEY_CHECKING`。遠端登入 shell 必須能在非互動 `PATH` 找到 `nvidia-smi`。
 
 ## Healthcheck 與 log
 
@@ -173,4 +201,4 @@ docker inspect idrac-fan-control --format '{{json .Mounts}}'
 
 請勿附上 `.env`、密碼、SSH private key、公開可達的管理 IP 或完整 service tag。
 
-文件最後檢視：2026-07-18。
+文件最後檢視：2026-08-15。

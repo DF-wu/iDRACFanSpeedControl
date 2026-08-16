@@ -14,6 +14,10 @@ export ESXI_HOST=10.0.0.20
 export ESXI_USERNAME=root
 export ESXI_PASSWORD=test-password
 export DRIVE_DEVICE=test-drive
+export LINUX_DISK_DEVICES=/dev/nvme1
+export REMOTE_GPU_HOSTS=gpu-vm-1
+export REMOTE_GPU_USERNAME=root
+export REMOTE_GPU_PASSWORD=test-password
 
 # shellcheck source=../src/FanControlWithEsxiSmart.sh
 source "${ROOT_DIR}/src/FanControlWithEsxiSmart.sh"
@@ -60,6 +64,15 @@ test_normalize_sources() {
     TEMPERATURE_SOURCES="idrac"
     WITH_GPU_TEMP=true
     assert_eq "idrac,gpu" "$(normalize_sources)" "WITH_GPU_TEMP appends gpu source"
+}
+
+test_temperature_sources_share_complete_interface() {
+    local source
+
+    for source in $TEMPERATURE_SOURCE_IDS; do
+        temperature_source_interface_complete "$source" || fail "${source} should implement the temperature source interface"
+        pass
+    done
 }
 
 test_hex_formatting() {
@@ -148,6 +161,143 @@ test_decision_temperature_uses_max_adjusted_source() {
     decision="$(get_decision_temperature)"
     assert_contains $'75\t' "$decision" "uses max of disk, iDRAC, and adjusted GPU temperature"
     assert_contains "gpu:gpu0=90C(adjusted=75C)" "$decision" "records adjusted GPU detail"
+}
+
+test_linux_disk_source_collects_multiple_devices_and_accepts_smart_warning_status() {
+    local output
+
+    output="$(
+        LINUX_DISK_DEVICES='/dev/nvme1, /dev/sdb'
+        timeout() {
+            shift
+            "$@"
+        }
+        smartctl() {
+            case "${*: -1}" in
+                /dev/nvme1) printf '{"temperature":73}\n'; return 8 ;;
+                /dev/sdb) printf '{"temperature":41}\n' ;;
+            esac
+        }
+        parse_smartctl_temperature() {
+            sed -nE 's/.*"temperature":([0-9]+).*/\1/p'
+        }
+        get_linux_disk_temperatures
+    )"
+
+    assert_contains $'linux_disk\tnvme1\t73' "$output" "keeps a valid reading when smartctl reports health status bits"
+    assert_contains $'linux_disk\tsdb\t41' "$output" "collects every configured Linux disk"
+}
+
+test_smartctl_json_parser_supports_nvme_and_generic_temperature() {
+    if ! command -v jq >/dev/null 2>&1; then
+        pass
+        return
+    fi
+
+    assert_eq "73" "$(parse_smartctl_temperature <<< '{"temperature":{"current":73},"nvme_smart_health_information_log":{"temperature":73}}')" "parses generic smartctl temperature.current"
+    assert_eq "61" "$(parse_smartctl_temperature <<< '{"nvme_smart_health_information_log":{"temperature":61}}')" "parses the NVMe health log fallback"
+}
+
+test_remote_gpu_source_collects_multiple_hosts() {
+    local output
+
+    output="$(
+        REMOTE_GPU_HOSTS='gpu-vm-1,gpu-vm-2'
+        run_ssh_command() {
+            local host="$2"
+            if [[ "$host" == "gpu-vm-1" ]]; then
+                printf '0, 81\n'
+            else
+                printf '0, 76\n1, 70\n'
+            fi
+        }
+        get_remote_gpu_temperatures
+    )"
+
+    assert_contains $'remote_gpu\tgpu-vm-1/gpu0\t81' "$output" "labels a remote GPU with its VM"
+    assert_contains $'remote_gpu\tgpu-vm-2/gpu1\t70' "$output" "collects every configured remote GPU VM"
+}
+
+test_source_specific_adjustment_is_dispatched_through_interface() {
+    local decision
+
+    REMOTE_GPU_TEMP_OFFSET=15
+    LINUX_DISK_TEMP_OFFSET=0
+    decision="$(calculate_decision_temperature $'linux_disk\tnvme1\t73\nremote_gpu\tgpu-vm/gpu0\t90')"
+    assert_contains $'75\t' "$decision" "uses the highest source-adjusted temperature"
+    assert_contains "remote_gpu:gpu-vm/gpu0=90C(adjusted=75C)" "$decision" "records remote GPU adjustment details"
+}
+
+test_linux_and_remote_sources_validate_configuration() {
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk,remote_gpu
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES=/dev/nvme1
+        REMOTE_GPU_HOSTS=gpu-vm-1,gpu-vm-2
+        REMOTE_GPU_USERNAME=monitor
+        REMOTE_GPU_PASSWORD=test-password
+        REMOTE_GPU_SSH_KEY=""
+        validate_config auto >/dev/null 2>&1
+    ) || fail "validate_config should accept Linux disk and remote GPU sources"
+    pass
+
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES='nvme1; touch /tmp/unsafe'
+        validate_config auto >/dev/null 2>&1
+    ) && fail "validate_config should reject unsafe Linux device paths"
+    pass
+
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES=/dev/../etc/passwd
+        validate_config auto >/dev/null 2>&1
+    ) && fail "validate_config should reject parent traversal in Linux device paths"
+    pass
+
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES=/dev/disk/by-id/nvme-KIOXIA_CD6
+        validate_config auto >/dev/null 2>&1
+    ) || fail "validate_config should accept nested Linux device paths"
+    pass
+
+    (
+        OPERATION_MODE=auto
+        TEMPERATURE_SOURCES=linux_disk
+        WITH_GPU_TEMP=false
+        DRY_RUN=true
+        IDRAC_IP=10.0.0.10
+        IDRAC_ID=root
+        IDRAC_PASSWORD=test-password
+        LINUX_DISK_DEVICES=/dev/sdb
+        LINUX_DISK_NOCHECK=invalid
+        validate_config auto >/dev/null 2>&1
+    ) && fail "validate_config should reject an invalid smartctl power mode"
+    pass
 }
 
 test_fail_safe_when_all_sources_fail() {
@@ -308,9 +458,10 @@ test_config_output_redacts_credentials() {
     IDRAC_IP=10.0.0.10
     IDRAC_PASSWORD=top-secret-password
     ESXI_PASSWORD=another-secret
+    REMOTE_GPU_PASSWORD=remote-secret
     output="$(print_effective_config)"
     assert_contains "set (19 characters)" "$output" "shows credential state without values"
-    if [[ "$output" == *top-secret-password* || "$output" == *another-secret* ]]; then
+    if [[ "$output" == *top-secret-password* || "$output" == *another-secret* || "$output" == *remote-secret* ]]; then
         fail "print_effective_config must never print credentials"
     fi
     pass
@@ -370,6 +521,7 @@ test_diagnose_reports_read_only_source_and_preview() {
 }
 
 test_normalize_sources
+test_temperature_sources_share_complete_interface
 test_hex_formatting
 test_remote_quote_handles_single_quotes
 test_esxi_password_is_not_in_process_arguments
@@ -377,6 +529,11 @@ test_temperature_levels
 test_hysteresis_only_delays_downshift
 test_idrac_sensor_parsing
 test_decision_temperature_uses_max_adjusted_source
+test_linux_disk_source_collects_multiple_devices_and_accepts_smart_warning_status
+test_smartctl_json_parser_supports_nvme_and_generic_temperature
+test_remote_gpu_source_collects_multiple_hosts
+test_source_specific_adjustment_is_dispatched_through_interface
+test_linux_and_remote_sources_validate_configuration
 test_fail_safe_when_all_sources_fail
 test_validate_accepts_idrac_only_auto_mode
 test_validate_rejects_placeholder_values

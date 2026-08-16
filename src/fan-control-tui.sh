@@ -15,6 +15,9 @@ CONFIG_KEYS=(
     IDRAC_SENSOR_INCLUDE_REGEX IDRAC_SENSOR_EXCLUDE_REGEX
     ESXI_HOST ESXI_USERNAME ESXI_PASSWORD ESXI_SSH_KEY ESXI_SSH_PORT
     SSH_CONNECT_TIMEOUT SSH_STRICT_HOST_KEY_CHECKING DRIVE_DEVICE
+    LINUX_DISK_DEVICES LINUX_DISK_TEMP_OFFSET LINUX_DISK_NOCHECK
+    REMOTE_GPU_HOSTS REMOTE_GPU_USERNAME REMOTE_GPU_PASSWORD REMOTE_GPU_SSH_KEY
+    REMOTE_GPU_SSH_PORT REMOTE_GPU_TEMP_OFFSET
     TEMP_LOW TEMP_MEDIUM TEMP_HIGH TEMP_CRITICAL
     FAN_SPEED_IDLE FAN_SPEED_LOW FAN_SPEED_MEDIUM FAN_SPEED_HIGH FAN_SPEED_CRITICAL
     HYSTERESIS FAILSAFE_ON_ERROR FAILSAFE_FAN_SPEED MANUAL_FAN_SPEED
@@ -301,29 +304,37 @@ select_sources() {
     printf '%sTemperature source preset%s\n\n' "$COLOR_BLUE" "$COLOR_RESET"
     printf '  1) iDRAC sensors only                 recommended first setup\n'
     printf '  2) ESXi NVMe SMART only\n'
-    printf '  3) iDRAC + ESXi NVMe SMART\n'
-    printf '  4) iDRAC + NVIDIA GPU\n'
-    printf '  5) ESXi NVMe SMART + NVIDIA GPU\n'
-    printf '  6) iDRAC + ESXi + NVIDIA GPU\n\n'
+    printf '  3) Local Linux disk SMART only\n'
+    printf '  4) iDRAC + local Linux disk SMART\n'
+    printf '  5) iDRAC + local NVIDIA GPU\n'
+    printf '  6) Local Linux disk + remote NVIDIA VMs\n'
+    printf '  7) Custom source list\n\n'
     while true; do
-        printf 'Choose [1-6]: '
+        printf 'Choose [1-7]: '
         IFS= read -r choice || return 1
         case "$choice" in
             1) sources="idrac" ;;
             2) sources="esxi" ;;
-            3) sources="idrac,esxi" ;;
-            4) sources="idrac,gpu" ;;
-            5) sources="esxi,gpu" ;;
-            6) sources="idrac,esxi,gpu" ;;
-            *) warning "Choose a number from 1 to 6."; continue ;;
+            3) sources="linux_disk" ;;
+            4) sources="idrac,linux_disk" ;;
+            5) sources="idrac,gpu" ;;
+            6) sources="linux_disk,remote_gpu" ;;
+            7)
+                prompt_value TEMPERATURE_SOURCES "Sources (esxi,idrac,gpu,linux_disk,remote_gpu)" true
+                sources="$(config_get TEMPERATURE_SOURCES)"
+                ;;
+            *) warning "Choose a number from 1 to 7."; continue ;;
         esac
         break
     done
 
     config_set TEMPERATURE_SOURCES "$sources"
     config_set WITH_GPU_TEMP "false"
-    if [[ "$sources" == *gpu* ]]; then
+    if [[ ",$sources," == *,gpu,* ]]; then
         prompt_integer GPU_TEMP_OFFSET "GPU temperature offset (C)" 0 120
+    fi
+    if [[ ",$sources," == *,remote_gpu,* ]]; then
+        prompt_integer REMOTE_GPU_TEMP_OFFSET "Remote GPU temperature offset (C)" 0 120
     fi
     notice "Temperature sources saved: ${sources}"
 }
@@ -342,6 +353,31 @@ configure_esxi() {
     fi
     prompt_value DRIVE_DEVICE "Full ESXi storage device identifier" true
     notice "ESXi settings saved."
+}
+
+configure_linux_disk() {
+    header
+    printf '%sLocal Linux disk SMART source%s\n\n' "$COLOR_BLUE" "$COLOR_RESET"
+    prompt_value LINUX_DISK_DEVICES "Device paths, comma-separated" true
+    prompt_integer LINUX_DISK_TEMP_OFFSET "Disk temperature offset (C)" 0 120
+    prompt_value LINUX_DISK_NOCHECK "Power mode check (never/sleep/standby/idle)" true
+    notice "Linux disk settings saved. Map each device into the container before diagnostics."
+}
+
+configure_remote_gpu() {
+    header
+    printf '%sRemote NVIDIA GPU source%s\n\n' "$COLOR_BLUE" "$COLOR_RESET"
+    prompt_value REMOTE_GPU_HOSTS "GPU VM hostnames or IPs, comma-separated" true
+    prompt_value REMOTE_GPU_USERNAME "SSH username shared by GPU VMs" true
+    prompt_integer REMOTE_GPU_SSH_PORT "SSH port" 1 65535
+    prompt_value REMOTE_GPU_SSH_KEY "SSH private key path (- clears it; blank keeps current)" false
+    if [[ -z "$(config_get REMOTE_GPU_SSH_KEY 2>/dev/null || true)" ]]; then
+        prompt_secret REMOTE_GPU_PASSWORD "SSH password shared by GPU VMs" true
+    else
+        warning "SSH key authentication selected; the password will be ignored."
+    fi
+    prompt_integer REMOTE_GPU_TEMP_OFFSET "Remote GPU temperature offset (C)" 0 120
+    notice "Remote GPU settings saved."
 }
 
 configure_curve() {
@@ -392,6 +428,12 @@ quick_setup() {
     if [[ "$(config_get TEMPERATURE_SOURCES)" == *esxi* ]]; then
         configure_esxi
     fi
+    if [[ "$(config_get TEMPERATURE_SOURCES)" == *linux_disk* ]]; then
+        configure_linux_disk
+    fi
+    if [[ "$(config_get TEMPERATURE_SOURCES)" == *remote_gpu* ]]; then
+        configure_remote_gpu
+    fi
     header
     notice "Quick setup is complete. Run Validate, then Diagnostics before starting auto mode."
     pause_screen
@@ -409,10 +451,12 @@ masked_state() {
 show_config() {
     local idrac_password
     local esxi_password
+    local remote_gpu_password
 
     header
     idrac_password="$(config_get IDRAC_PASSWORD 2>/dev/null || true)"
     esxi_password="$(config_get ESXI_PASSWORD 2>/dev/null || true)"
+    remote_gpu_password="$(config_get REMOTE_GPU_PASSWORD 2>/dev/null || true)"
     printf '%sEffective setup (secrets redacted)%s\n\n' "$COLOR_BLUE" "$COLOR_RESET"
     printf '  %-28s %s\n' "Mode" "$(config_get OPERATION_MODE 2>/dev/null || true)"
     printf '  %-28s %s\n' "Sources" "$(config_get TEMPERATURE_SOURCES 2>/dev/null || true)"
@@ -421,6 +465,9 @@ show_config() {
     printf '  %-28s %s@%s:%s\n' "ESXi" "$(config_get ESXI_USERNAME 2>/dev/null || true)" "$(config_get ESXI_HOST 2>/dev/null || true)" "$(config_get ESXI_SSH_PORT 2>/dev/null || true)"
     printf '  %-28s %s\n' "ESXi password" "$(masked_state "$esxi_password")"
     printf '  %-28s %s\n' "Drive device" "$(config_get DRIVE_DEVICE 2>/dev/null || true)"
+    printf '  %-28s %s\n' "Linux disks" "$(config_get LINUX_DISK_DEVICES 2>/dev/null || true)"
+    printf '  %-28s %s@%s:%s\n' "Remote GPU VMs" "$(config_get REMOTE_GPU_USERNAME 2>/dev/null || true)" "$(config_get REMOTE_GPU_HOSTS 2>/dev/null || true)" "$(config_get REMOTE_GPU_SSH_PORT 2>/dev/null || true)"
+    printf '  %-28s %s\n' "Remote GPU password" "$(masked_state "$remote_gpu_password")"
     printf '  %-28s %s/%s/%s/%s C\n' "Thresholds" "$(config_get TEMP_LOW)" "$(config_get TEMP_MEDIUM)" "$(config_get TEMP_HIGH)" "$(config_get TEMP_CRITICAL)"
     printf '  %-28s %s/%s/%s/%s/%s %%\n' "Fan speeds" "$(config_get FAN_SPEED_IDLE)" "$(config_get FAN_SPEED_LOW)" "$(config_get FAN_SPEED_MEDIUM)" "$(config_get FAN_SPEED_HIGH)" "$(config_get FAN_SPEED_CRITICAL)"
     printf '  %-28s enabled=%s, %s%%\n' "Fail-safe" "$(config_get FAILSAFE_ON_ERROR)" "$(config_get FAILSAFE_FAN_SPEED)"
@@ -483,31 +530,35 @@ main_menu() {
         printf '  2) iDRAC / IPMI settings\n'
         printf '  3) Temperature source preset\n'
         printf '  4) ESXi NVMe source settings\n'
-        printf '  5) Fan curve\n'
-        printf '  6) Safety, timing, and logging\n'
-        printf '  7) Review redacted configuration\n'
-        printf '  8) Validate configuration\n'
-        printf '  9) Run read-only diagnostics\n'
+        printf '  5) Local Linux disk settings\n'
+        printf '  6) Remote NVIDIA GPU settings\n'
+        printf '  7) Fan curve\n'
+        printf '  8) Safety, timing, and logging\n'
+        printf '  9) Review redacted configuration\n'
+        printf ' 10) Validate configuration\n'
+        printf ' 11) Run read-only diagnostics\n'
         printf '  0) Save and exit\n\n'
-        printf 'Choose [0-9]: '
+        printf 'Choose [0-11]: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) quick_setup ;;
             2) configure_idrac; pause_screen ;;
             3) select_sources; pause_screen ;;
             4) configure_esxi; pause_screen ;;
-            5) configure_curve; pause_screen ;;
-            6) configure_safety; pause_screen ;;
-            7) show_config ;;
-            8) run_and_pause validate ;;
-            9) run_and_pause diagnose ;;
+            5) configure_linux_disk; pause_screen ;;
+            6) configure_remote_gpu; pause_screen ;;
+            7) configure_curve; pause_screen ;;
+            8) configure_safety; pause_screen ;;
+            9) show_config ;;
+            10) run_and_pause validate ;;
+            11) run_and_pause diagnose ;;
             0)
                 header
                 notice "Saved ${CONFIG_FILE} with mode 600."
                 printf 'Next: make validate && docker compose up -d\n'
                 return 0
                 ;;
-            *) warning "Choose a number from 0 to 9."; pause_screen ;;
+            *) warning "Choose a number from 0 to 11."; pause_screen ;;
         esac
     done
 }
