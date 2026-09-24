@@ -9,7 +9,7 @@
 A fan controller for Dell PowerEdge servers. It sets the fan duty cycle through iDRAC IPMI OEM raw commands, then selects a fan-curve level from pluggable temperature sources: ESXi NVMe SMART, iDRAC sensors, local Linux disks, and local or remote NVIDIA GPUs.
 
 > [!CAUTION]
-> This program temporarily overrides Dell's automatic fan control. During initial setup, keep the iDRAC Web UI or a physical console available. Verify `manual`, `restore`, and `diagnose` before running `auto` for an extended period. If the server overheats, readings become unreliable, or behavior is abnormal, run `restore` immediately and stop the container.
+> This project has been tested on only my Dell PowerEdge R730xd with iDRAC 8. Other server models and iDRAC firmware versions are untested and must not be assumed compatible. This program temporarily overrides Dell's automatic fan control; use it at your own risk. During initial setup, keep the iDRAC Web UI or a physical console available. Verify `manual`, `restore`, and `diagnose` on your own hardware before running `auto` for an extended period. If the server overheats, readings become unreliable, or behavior is abnormal, run `restore` immediately and stop the container.
 
 ## How it works
 

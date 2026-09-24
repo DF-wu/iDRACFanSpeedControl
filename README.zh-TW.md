@@ -9,7 +9,7 @@
 這是一個給 Dell PowerEdge 使用的風扇控制器。它透過 iDRAC 的 IPMI OEM raw command 設定 fan duty cycle，再以可插拔溫度來源決定風扇曲線：ESXi NVMe SMART、iDRAC sensor、本機 Linux 磁碟，以及本機或遠端 NVIDIA GPU。
 
 > [!CAUTION]
-> 這個程式會暫時覆寫 Dell 原廠風扇控制。第一次設定請保留 iDRAC Web UI 或實體主控台，先用 `manual`、`restore`、`diagnose` 驗證，再讓 `auto` 長時間執行。任何過熱、讀值不可信或行為異常時，立即執行 `restore` 並停止容器。
+> 本專案只在我自己的 Dell PowerEdge R730xd（iDRAC 8）上實機測試過；其他伺服器型號與 iDRAC 韌體版本均未驗證，不應假設相容。這個程式會暫時覆寫 Dell 原廠風扇控制，使用風險由使用者自行承擔。第一次設定請保留 iDRAC Web UI 或實體主控台，務必先在自己的硬體上用 `manual`、`restore`、`diagnose` 驗證，再讓 `auto` 長時間執行。任何過熱、讀值不可信或行為異常時，立即執行 `restore` 並停止容器。
 
 ## 先看懂它如何工作
 
