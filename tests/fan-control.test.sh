@@ -81,6 +81,25 @@ test_hex_formatting() {
     assert_eq "05" "$(fan_speed_to_hex 5)" "pads single digit fan speeds for IPMI raw command"
 }
 
+test_fan_speed_failure_restores_automatic_control() {
+    local -a commands=()
+    local original_run_ipmitool
+
+    original_run_ipmitool="$(declare -f run_ipmitool)"
+    DRY_RUN=false
+    run_ipmitool() {
+        commands+=("$*")
+        [[ "$*" != "raw 0x30 0x30 0x02 0xff 0x23" ]]
+    }
+
+    set_fan_speed 35 >/dev/null 2>&1 && fail "set_fan_speed should fail when the duty command fails"
+    assert_eq "raw 0x30 0x30 0x01 0x00" "${commands[0]}" "enables manual control first"
+    assert_eq "raw 0x30 0x30 0x02 0xff 0x23" "${commands[1]}" "attempts the requested duty cycle"
+    assert_eq "raw 0x30 0x30 0x01 0x01" "${commands[2]}" "restores Dell automatic control after a partial failure"
+    eval "$original_run_ipmitool"
+    DRY_RUN=true
+}
+
 test_remote_quote_handles_single_quotes() {
     assert_eq "'abc'\\''def'" "$(remote_quote "abc'def")" "quotes ESXi device IDs for remote shell"
 }
@@ -161,6 +180,20 @@ test_decision_temperature_uses_max_adjusted_source() {
     decision="$(get_decision_temperature)"
     assert_contains $'75\t' "$decision" "uses max of disk, iDRAC, and adjusted GPU temperature"
     assert_contains "gpu:gpu0=90C(adjusted=75C)" "$decision" "records adjusted GPU detail"
+}
+
+test_decision_temperature_rejects_implausible_readings() {
+    local decision
+
+    LINUX_DISK_TEMP_OFFSET=0
+    REMOTE_GPU_TEMP_OFFSET=15
+    decision="$(calculate_decision_temperature $'linux_disk\tnvme0\t11759\nremote_gpu\tgpu-vm/gpu0\t49')"
+
+    assert_contains $'34\t' "$decision" "ignores an implausible SMART temperature"
+    if [[ "$decision" == *"11759"* ]]; then
+        fail "implausible readings must not appear in the accepted decision details"
+    fi
+    pass
 }
 
 test_linux_disk_source_collects_multiple_devices_and_accepts_smart_warning_status() {
@@ -523,12 +556,14 @@ test_diagnose_reports_read_only_source_and_preview() {
 test_normalize_sources
 test_temperature_sources_share_complete_interface
 test_hex_formatting
+test_fan_speed_failure_restores_automatic_control
 test_remote_quote_handles_single_quotes
 test_esxi_password_is_not_in_process_arguments
 test_temperature_levels
 test_hysteresis_only_delays_downshift
 test_idrac_sensor_parsing
 test_decision_temperature_uses_max_adjusted_source
+test_decision_temperature_rejects_implausible_readings
 test_linux_disk_source_collects_multiple_devices_and_accepts_smart_warning_status
 test_smartctl_json_parser_supports_nvme_and_generic_temperature
 test_remote_gpu_source_collects_multiple_hosts

@@ -496,7 +496,11 @@ set_fan_speed() {
 
     log "INFO" "Setting fan speed to ${fan_speed}% (0x${hex_speed})"
     run_ipmitool raw 0x30 0x30 0x01 0x00 || return 1
-    run_ipmitool raw 0x30 0x30 0x02 0xff "0x${hex_speed}"
+    if ! run_ipmitool raw 0x30 0x30 0x02 0xff "0x${hex_speed}"; then
+        log "ERROR" "Fan speed command failed after manual control was enabled; attempting to restore Dell automatic control"
+        restore_auto_control || log "ERROR" "Emergency restore of Dell automatic fan control failed"
+        return 1
+    fi
 }
 
 restore_auto_control() {
@@ -901,6 +905,10 @@ calculate_decision_temperature() {
     while IFS=$'\t' read -r source label temp; do
         [[ -z "${source:-}" || -z "${temp:-}" ]] && continue
         is_integer "$temp" || continue
+        if (( temp < -20 || temp > 150 )); then
+            log "WARN" "Temperature source '${source}' returned an implausible reading for ${label}: ${temp}C"
+            continue
+        fi
 
         if ! adjusted="$(temperature_source_method "$source" adjust "$temp")" || ! is_integer "$adjusted"; then
             log "WARN" "Temperature source '${source}' returned an invalid adjusted value for ${label}"
