@@ -50,6 +50,7 @@ PROGRAM_NAME="$(basename "$0")"
 : "${FAN_SPEED_MEDIUM:=40}"
 : "${FAN_SPEED_HIGH:=50}"
 : "${FAN_SPEED_CRITICAL:=60}"
+: "${FAN_SPEED_INTERPOLATION:=true}"
 : "${FAILSAFE_FAN_SPEED:=70}"
 : "${FAILSAFE_ON_ERROR:=true}"
 : "${RESTORE_AUTO_ON_EXIT:=true}"
@@ -377,7 +378,7 @@ validate_config() {
     fi
 
     if command_needs_temperature "$command"; then
-        for bool_name in WITH_GPU_TEMP FAILSAFE_ON_ERROR RESTORE_AUTO_ON_EXIT; do
+        for bool_name in WITH_GPU_TEMP FAILSAFE_ON_ERROR RESTORE_AUTO_ON_EXIT FAN_SPEED_INTERPOLATION; do
             if ! is_bool "${!bool_name}"; then
                 log "ERROR" "${bool_name} must be a boolean value"
                 error=1
@@ -987,6 +988,36 @@ fan_speed_for_level() {
     esac
 }
 
+# The validated curve is nondecreasing with strictly increasing temperatures.
+# Keep idle separate: TEMP_LOW is the first interpolation anchor.
+interpolated_fan_speed() {
+    local temp="$1"
+    local lower_temp upper_temp lower_speed upper_speed
+
+    if (( temp < TEMP_LOW )); then
+        printf '%s' "$FAN_SPEED_IDLE"
+        return 0
+    elif (( temp >= TEMP_CRITICAL )); then
+        printf '%s' "$FAN_SPEED_CRITICAL"
+        return 0
+    elif (( temp < TEMP_MEDIUM )); then
+        lower_temp="$TEMP_LOW" upper_temp="$TEMP_MEDIUM"
+        lower_speed="$FAN_SPEED_LOW" upper_speed="$FAN_SPEED_MEDIUM"
+    elif (( temp < TEMP_HIGH )); then
+        lower_temp="$TEMP_MEDIUM" upper_temp="$TEMP_HIGH"
+        lower_speed="$FAN_SPEED_MEDIUM" upper_speed="$FAN_SPEED_HIGH"
+    else
+        lower_temp="$TEMP_HIGH" upper_temp="$TEMP_CRITICAL"
+        lower_speed="$FAN_SPEED_HIGH" upper_speed="$FAN_SPEED_CRITICAL"
+    fi
+
+    # Integer ceiling never rounds below the computed cooling demand. With
+    # validated anchors the result stays within this segment's duty bounds.
+    local span=$((upper_temp - lower_temp))
+    local rise=$(((upper_speed - lower_speed) * (temp - lower_temp)))
+    printf '%s' "$((lower_speed + (rise + span - 1) / span))"
+}
+
 apply_hysteresis() {
     local temp="$1"
     local proposed_level="$2"
@@ -1028,8 +1059,15 @@ choose_fan_speed() {
     local speed
 
     raw_level="$(temperature_level "$temp")"
-    level="$(apply_hysteresis "$temp" "$raw_level" "$previous_level")"
-    speed="$(fan_speed_for_level "$level")"
+    if is_true "$FAN_SPEED_INTERPOLATION"; then
+        # Level is diagnostic only in this mode; legacy level hysteresis would
+        # flatten the curve and can suppress required upward cooling.
+        level="$raw_level"
+        speed="$(interpolated_fan_speed "$temp")"
+    else
+        level="$(apply_hysteresis "$temp" "$raw_level" "$previous_level")"
+        speed="$(fan_speed_for_level "$level")"
+    fi
     printf '%s\t%s\n' "$level" "$speed"
 }
 
@@ -1123,7 +1161,8 @@ auto_mode() {
 
     log "INFO" "Automatic fan control started"
     log "INFO" "Temperature sources: $(normalize_sources)"
-    log "INFO" "Check interval: ${CHECK_INTERVAL}s, hysteresis: ${HYSTERESIS}C, fail-safe: ${FAILSAFE_FAN_SPEED}%"
+    log "INFO" "Fan curve: $(fan_curve_mode); hysteresis: $(hysteresis_description)"
+    log "INFO" "Check interval: ${CHECK_INTERVAL}s, fail-safe: ${FAILSAFE_FAN_SPEED}%"
 
     trap cleanup_auto_mode EXIT
     trap 'exit 130' INT TERM
@@ -1158,6 +1197,22 @@ config_row() {
     printf '  %-30s %s\n' "$1" "$2"
 }
 
+fan_curve_mode() {
+    if is_true "$FAN_SPEED_INTERPOLATION"; then
+        printf 'piecewise linear (ceiling to integer duty)'
+    else
+        printf 'stepwise'
+    fi
+}
+
+hysteresis_description() {
+    if is_true "$FAN_SPEED_INTERPOLATION"; then
+        printf '%s C (inactive in interpolation mode)' "$HYSTERESIS"
+    else
+        printf '%s C (downshift only)' "$HYSTERESIS"
+    fi
+}
+
 print_effective_config() {
     local esxi_auth="password"
     local remote_gpu_auth="password"
@@ -1182,7 +1237,8 @@ print_effective_config() {
     config_row "GPU offsets" "local=${GPU_TEMP_OFFSET} C, remote=${REMOTE_GPU_TEMP_OFFSET} C"
     config_row "Fan thresholds" "${TEMP_LOW}/${TEMP_MEDIUM}/${TEMP_HIGH}/${TEMP_CRITICAL} C"
     config_row "Fan speeds" "${FAN_SPEED_IDLE}/${FAN_SPEED_LOW}/${FAN_SPEED_MEDIUM}/${FAN_SPEED_HIGH}/${FAN_SPEED_CRITICAL}%"
-    config_row "Hysteresis" "${HYSTERESIS} C"
+    config_row "Fan speed interpolation" "$FAN_SPEED_INTERPOLATION ($(fan_curve_mode))"
+    config_row "Hysteresis" "$(hysteresis_description)"
     config_row "Fail-safe" "enabled=${FAILSAFE_ON_ERROR}, speed=${FAILSAFE_FAN_SPEED}%"
     config_row "Restore on exit" "$RESTORE_AUTO_ON_EXIT"
     config_row "Timing" "interval=${CHECK_INTERVAL}s, command-timeout=${COMMAND_TIMEOUT}s"
@@ -1230,6 +1286,7 @@ diagnose_mode() {
     printf 'iDRAC Fan Control diagnostics (read-only)\n'
     printf 'Generated: %s\n\n' "$(timestamp)"
     diagnostic_row "PASS" "configuration" "static validation passed"
+    diagnostic_row "PASS" "fan curve" "$(fan_curve_mode); hysteresis: $(hysteresis_description)"
 
     if [[ -z "$LOG_DIR" ]] || prepare_log_dir; then
         diagnostic_row "PASS" "log path" "${LOG_DIR:-disabled}"

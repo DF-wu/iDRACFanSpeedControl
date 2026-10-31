@@ -101,6 +101,35 @@ test_new_source_configuration_round_trips() {
     assert_eq 'set (13 characters)' "$(masked_state "$(config_get REMOTE_GPU_PASSWORD)")" "masks the remote GPU credential"
 }
 
+test_interpolation_round_trip() {
+    assert_eq true "$(config_get FAN_SPEED_INTERPOLATION)" "new configurations enable interpolation"
+    configure_curve <<< $'no\n\n\n\n\n\n\n\n\n' >/dev/null
+    assert_eq false "$(config_get FAN_SPEED_INTERPOLATION)" "TUI disables interpolation"
+    load_config_environment
+    assert_eq false "$FAN_SPEED_INTERPOLATION" "controller environment preserves false"
+    prompt_boolean FAN_SPEED_INTERPOLATION 'Interpolation' <<< yes >/dev/null
+    assert_eq true "$(config_get FAN_SPEED_INTERPOLATION)" "TUI enables interpolation"
+    load_config_environment
+    assert_eq true "$FAN_SPEED_INTERPOLATION" "controller environment preserves true"
+}
+
+test_legacy_config_defaults_to_interpolation() {
+    local CONFIG_FILE="${TMP_DIR}/legacy.env"
+    local output
+    sed '/^FAN_SPEED_INTERPOLATION=/d' "$FAN_CONTROL_CONFIG" > "$CONFIG_FILE"
+    output="$(show_config <<< '')"
+    assert_eq true "$(awk '/Fan speed interpolation/ {print $NF}' <<< "$output")" "review defaults existing env files to interpolation"
+    config_set FAN_SPEED_INTERPOLATION ''
+    output="$(show_config <<< '')"
+    assert_eq true "$(awk '/Fan speed interpolation/ {print $NF}' <<< "$output")" "review treats an empty switch like the controller default"
+    configure_curve <<< $'\n\n\n\n\n\n\n\n\n' >/dev/null
+    assert_eq true "$(config_get FAN_SPEED_INTERPOLATION)" "blank TUI input applies default to existing env files"
+}
+
+test_legacy_config_defaults_to_interpolation
+
+test_interpolation_round_trip
+
 test_config_round_trip_and_preserves_comments
 test_config_set_does_not_duplicate_keys
 test_config_rejects_unknown_key_and_newline

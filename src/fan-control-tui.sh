@@ -20,7 +20,7 @@ CONFIG_KEYS=(
     REMOTE_GPU_SSH_PORT REMOTE_GPU_TEMP_OFFSET
     TEMP_LOW TEMP_MEDIUM TEMP_HIGH TEMP_CRITICAL
     FAN_SPEED_IDLE FAN_SPEED_LOW FAN_SPEED_MEDIUM FAN_SPEED_HIGH FAN_SPEED_CRITICAL
-    HYSTERESIS FAILSAFE_ON_ERROR FAILSAFE_FAN_SPEED MANUAL_FAN_SPEED
+    FAN_SPEED_INTERPOLATION HYSTERESIS FAILSAFE_ON_ERROR FAILSAFE_FAN_SPEED MANUAL_FAN_SPEED
     LOG_DIR LOG_FILE LOG_LEVEL HEALTHCHECK_MAX_AGE
 )
 
@@ -273,6 +273,9 @@ prompt_boolean() {
     local value
 
     current="$(config_get "$key" 2>/dev/null || true)"
+    if [[ "$key" == FAN_SPEED_INTERPOLATION && -z "$current" ]]; then
+        current=true
+    fi
     while true; do
         printf '%s (yes/no) [%s]: ' "$label" "${current:-empty}"
         IFS= read -r value || return 1
@@ -384,6 +387,10 @@ configure_curve() {
     header
     printf '%sFan curve%s\n' "$COLOR_BLUE" "$COLOR_RESET"
     printf '%sThresholds and speeds must rise from idle to critical.%s\n\n' "$COLOR_DIM" "$COLOR_RESET"
+    printf 'Interpolation uses low/medium/high/critical anchors, rounded up.\n'
+    printf 'Below low uses idle; distinct idle/low speeds jump at the low threshold.\n'
+    printf 'Hysteresis applies only when interpolation is disabled.\n\n'
+    prompt_boolean FAN_SPEED_INTERPOLATION "Enable piecewise linear interpolation"
     prompt_integer TEMP_LOW "Low threshold (C)" 0 120
     prompt_integer TEMP_MEDIUM "Medium threshold (C)" 0 120
     prompt_integer TEMP_HIGH "High threshold (C)" 0 120
@@ -401,7 +408,7 @@ configure_safety() {
 
     header
     printf '%sSafety, timing, and logging%s\n\n' "$COLOR_BLUE" "$COLOR_RESET"
-    prompt_integer HYSTERESIS "Downshift hysteresis (C)" 0 30
+    prompt_integer HYSTERESIS "Downshift hysteresis (C; stepwise mode only)" 0 30
     prompt_integer CHECK_INTERVAL "Automatic check interval (seconds)" 1 86400
     prompt_integer COMMAND_TIMEOUT "External command timeout (seconds)" 1 300
     prompt_boolean FAILSAFE_ON_ERROR "Apply fail-safe if every source fails"
@@ -452,11 +459,13 @@ show_config() {
     local idrac_password
     local esxi_password
     local remote_gpu_password
+    local interpolation
 
     header
     idrac_password="$(config_get IDRAC_PASSWORD 2>/dev/null || true)"
     esxi_password="$(config_get ESXI_PASSWORD 2>/dev/null || true)"
     remote_gpu_password="$(config_get REMOTE_GPU_PASSWORD 2>/dev/null || true)"
+    interpolation="$(config_get FAN_SPEED_INTERPOLATION 2>/dev/null || true)"
     printf '%sEffective setup (secrets redacted)%s\n\n' "$COLOR_BLUE" "$COLOR_RESET"
     printf '  %-28s %s\n' "Mode" "$(config_get OPERATION_MODE 2>/dev/null || true)"
     printf '  %-28s %s\n' "Sources" "$(config_get TEMPERATURE_SOURCES 2>/dev/null || true)"
@@ -470,6 +479,8 @@ show_config() {
     printf '  %-28s %s\n' "Remote GPU password" "$(masked_state "$remote_gpu_password")"
     printf '  %-28s %s/%s/%s/%s C\n' "Thresholds" "$(config_get TEMP_LOW)" "$(config_get TEMP_MEDIUM)" "$(config_get TEMP_HIGH)" "$(config_get TEMP_CRITICAL)"
     printf '  %-28s %s/%s/%s/%s/%s %%\n' "Fan speeds" "$(config_get FAN_SPEED_IDLE)" "$(config_get FAN_SPEED_LOW)" "$(config_get FAN_SPEED_MEDIUM)" "$(config_get FAN_SPEED_HIGH)" "$(config_get FAN_SPEED_CRITICAL)"
+    printf '  %-28s %s\n' "Fan speed interpolation" "${interpolation:-true}"
+    printf '  %-28s %s C (stepwise mode only)\n' "Hysteresis" "$(config_get HYSTERESIS)"
     printf '  %-28s enabled=%s, %s%%\n' "Fail-safe" "$(config_get FAILSAFE_ON_ERROR)" "$(config_get FAILSAFE_FAN_SPEED)"
     printf '  %-28s %s\n' "Log level" "$(config_get LOG_LEVEL 2>/dev/null || printf INFO)"
     printf '\n%sNo fan command was sent.%s\n' "$COLOR_DIM" "$COLOR_RESET"

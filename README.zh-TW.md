@@ -173,10 +173,13 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     R[所有有效 readings] --> M{取最高 adjusted temperature}
-    M --> L[temperature_level]
+    M --> I{FAN_SPEED_INTERPOLATION?}
+    I -- true --> C[錨點間線性插值並向上取整]
+    C --> F
+    I -- false --> L[temperature_level]
     L --> H{比上一檔更低?}
     H -- 否 --> S[立即升檔或維持]
-    H -- 是 --> X{低於前一檔 threshold - HYSTERESIS?}
+    H -- 是 --> X{小於等於前一檔 threshold - HYSTERESIS?}
     X -- 否 --> S2[維持上一檔]
     X -- 是 --> S3[降到新檔]
     S --> F[套用 fan speed]
@@ -185,18 +188,24 @@ flowchart TD
     R -. 全部失敗 .-> FS[FAILSAFE_FAN_SPEED]
 ```
 
-預設曲線如下；`validate` 會確保 threshold 嚴格遞增、fan speed 不遞減，且 fail-safe 不低於 critical speed。
+預設插值錨點與邊界速度如下。錨點間的 duty 線性增加，日誌 level 仍表示溫度區間；`validate` 會確保 threshold 嚴格遞增、fan speed 不遞減，且 fail-safe 不低於 critical speed。
 
-| Level | 決策溫度 | 預設風扇 |
+| Level | 錨點／邊界溫度 | 預設風扇 |
 | --- | --- | --- |
-| `idle` | `<65°C` | 25% |
-| `low` | `65–69°C` | 30% |
-| `medium` | `70–74°C` | 40% |
-| `high` | `75–79°C` | 50% |
+| `idle` | `<65°C` | 30% |
+| `low` | `65°C` | 30% |
+| `medium` | `70°C` | 40% |
+| `high` | `75°C` | 50% |
 | `critical` | `>=80°C` | 60% |
 | `failsafe` | 所有來源失敗 | 70% |
 
-降檔會等待 `HYSTERESIS` 度，避免溫度在閾值附近來回跳速；升檔不延遲。每個來源自行調整讀值：本機與遠端 GPU 分別扣除各自 offset，Linux 磁碟扣除 `LINUX_DISK_TEMP_OFFSET`，最低都不會小於 0°C。
+`FAN_SPEED_INTERPOLATION=true` 預設開啟；舊設定檔未加入此選項時也會啟用。控制器以 `(TEMP_LOW, FAN_SPEED_LOW)`、`(TEMP_MEDIUM, FAN_SPEED_MEDIUM)`、`(TEMP_HIGH, FAN_SPEED_HIGH)`、`(TEMP_CRITICAL, FAN_SPEED_CRITICAL)` 為四個錨點做分段線性插值，duty **向上取整**為整數百分比。驗證後的曲線單調不減且介於 1–100%；低於 `TEMP_LOW` 使用 `FAN_SPEED_IDLE`，達到或超過 `TEMP_CRITICAL` 固定使用 `FAN_SPEED_CRITICAL`。沒有額外的 idle 溫度錨點：idle 與 low 速度不同時，`TEMP_LOW` 處會有刻意保留的跳差。
+
+插值模式在升降溫時都不套用 `HYSTERESIS`，也不受前次 level 限制。每次成功收集後立即依目前需求決定速度，同一 level 內升溫也立即提高 duty；整數 duty 未變時不重送命令。不額外加入平滑、PID 或速率限制。例如閾值 `65/70/75/80`、速度 `30/35/45/60/65` 時，`70/71/72/73/74/75°C` 對應 `45/48/51/54/57/60%`。
+
+設定 `FAN_SPEED_INTERPOLATION=false` 可恢復原本階梯模式：維持該檔速度直到下一閾值，僅降檔需等到溫度低於或等於「前一檔閾值減 `HYSTERESIS`」，升檔不延遲。TUI 的 **Fan curve** 可切換此選項；`config` 與唯讀 `diagnose` 會顯示模式及遲滯是否生效。
+
+每個來源自行調整讀值：本機與遠端 GPU 分別扣除各自 offset，Linux 磁碟扣除 `LINUX_DISK_TEMP_OFFSET`，最低都不會小於 0°C。
 
 ## 設定參考
 
@@ -244,8 +253,9 @@ flowchart TD
 | 變數 | 預設 | 說明 |
 | --- | --- | --- |
 | `TEMP_LOW/MEDIUM/HIGH/CRITICAL` | `65/70/75/80` | 嚴格遞增的°C threshold |
-| `FAN_SPEED_IDLE/LOW/MEDIUM/HIGH/CRITICAL` | `25/30/40/50/60` | 1–100%，不可遞減 |
-| `HYSTERESIS` | `2` | 降檔所需低於前 threshold 的°C |
+| `FAN_SPEED_IDLE/LOW/MEDIUM/HIGH/CRITICAL` | `30/30/40/50/60` | 1–100%，不可遞減；idle 未設定時沿用 low |
+| `FAN_SPEED_INTERPOLATION` | `true` | 分段線性插值並向上取整；`false` 恢復原本階梯模式 |
+| `HYSTERESIS` | `2` | 僅階梯模式：降檔所需低於前 threshold 的°C |
 | `FAILSAFE_ON_ERROR` | `true` | 所有來源失敗時使用保守速度 |
 | `FAILSAFE_FAN_SPEED` | `70` | 必須 >= critical speed |
 | `MANUAL_FAN_SPEED` | `35` | `manual` 未帶參數時使用 |
@@ -360,7 +370,7 @@ make validate-example # 不需要 .env 的 DRY_RUN smoke test
 make docker-build
 ```
 
-測試涵蓋統一 source 介面、Linux SMART 收集、多主機 remote GPU、source offset、SDR parsing、hysteresis、fail-safe、設定驗證、credential redaction、health freshness、診斷 preview，以及 TUI 設定檔安全 round-trip。真實硬體、SSH target、磁碟、iDRAC 與 GPU 仍須在管理網路上以 `diagnose` 驗證。
+測試涵蓋統一 source 介面、Linux SMART 收集、多主機 remote GPU、source offset、SDR parsing、插值錨點／取整／邊界、原本降檔遲滯、控制循環狀態與 fail-safe 復原、設定驗證、credential redaction、health freshness、診斷 preview，以及 TUI 設定檔安全 round-trip。真實硬體、SSH target、磁碟、iDRAC 與 GPU 仍須在管理網路上以 `diagnose` 驗證。
 
 ## 專案結構
 

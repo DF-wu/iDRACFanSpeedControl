@@ -6,7 +6,7 @@
 [![Container](https://img.shields.io/badge/container-GHCR-blue)](https://github.com/DF-wu/iDRACFanSpeedControl/pkgs/container/idrac-fan-control)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-A fan controller for Dell PowerEdge servers. It sets the fan duty cycle through iDRAC IPMI OEM raw commands, then selects a fan-curve level from pluggable temperature sources: ESXi NVMe SMART, iDRAC sensors, local Linux disks, and local or remote NVIDIA GPUs.
+A fan controller for Dell PowerEdge servers. It sets the fan duty cycle through iDRAC IPMI OEM raw commands, then calculates fan speed from a configurable curve using pluggable temperature sources: ESXi NVMe SMART, iDRAC sensors, local Linux disks, and local or remote NVIDIA GPUs.
 
 > [!CAUTION]
 > This project has been tested on only my Dell PowerEdge R730xd with iDRAC 8. Other server models and iDRAC firmware versions are untested and must not be assumed compatible. This program temporarily overrides Dell's automatic fan control; use it at your own risk. During initial setup, keep the iDRAC Web UI or a physical console available. Verify `manual`, `restore`, and `diagnose` on your own hardware before running `auto` for an extended period. If the server overheats, readings become unreliable, or behavior is abnormal, run `restore` immediately and stop the container.
@@ -173,10 +173,13 @@ Before unattended operation, confirm each item:
 ```mermaid
 flowchart TD
     R[All valid readings] --> M{Select highest adjusted temperature}
-    M --> L[temperature_level]
+    M --> I{FAN_SPEED_INTERPOLATION?}
+    I -- true --> C[Interpolate anchors and round duty up]
+    C --> F
+    I -- false --> L[temperature_level]
     L --> H{Lower than previous level?}
     H -- No --> S[Increase immediately or keep level]
-    H -- Yes --> X{Below previous threshold - HYSTERESIS?}
+    H -- Yes --> X{At or below previous threshold - HYSTERESIS?}
     X -- No --> S2[Keep previous level]
     X -- Yes --> S3[Move to lower level]
     S --> F[Apply fan speed]
@@ -185,18 +188,24 @@ flowchart TD
     R -. All sources fail .-> FS[FAILSAFE_FAN_SPEED]
 ```
 
-The default curve is shown below. `validate` ensures that thresholds are strictly increasing, fan speeds never decrease, and the fail-safe speed is not lower than the critical speed.
+The default interpolation anchors and boundary speeds are shown below. Between anchors, duty rises linearly; the logged level names still describe the temperature band. `validate` ensures that thresholds are strictly increasing, fan speeds never decrease, and the fail-safe speed is not lower than the critical speed.
 
-| Level | Decision temperature | Default fan speed |
+| Level | Anchor / boundary temperature | Default fan speed |
 | --- | --- | --- |
-| `idle` | `<65°C` | 25% |
-| `low` | `65–69°C` | 30% |
-| `medium` | `70–74°C` | 40% |
-| `high` | `75–79°C` | 50% |
+| `idle` | `<65°C` | 30% |
+| `low` | `65°C` | 30% |
+| `medium` | `70°C` | 40% |
+| `high` | `75°C` | 50% |
 | `critical` | `>=80°C` | 60% |
 | `failsafe` | All sources fail | 70% |
 
-Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` degrees below the relevant threshold, preventing repeated speed changes near a boundary. Moving to a higher level is immediate. Each source owns its adjustment: local and remote GPUs subtract their configured offset, Linux disks subtract `LINUX_DISK_TEMP_OFFSET`, and all results have a minimum of 0°C.
+`FAN_SPEED_INTERPOLATION=true` is the default, including for existing configurations that omit the option. It joins `(TEMP_LOW, FAN_SPEED_LOW)`, `(TEMP_MEDIUM, FAN_SPEED_MEDIUM)`, `(TEMP_HIGH, FAN_SPEED_HIGH)`, and `(TEMP_CRITICAL, FAN_SPEED_CRITICAL)` with straight segments. Duty is rounded **up** to an integer percentage, stays monotonic within the validated 1–100% range, uses `FAN_SPEED_IDLE` below `TEMP_LOW`, and clamps to `FAN_SPEED_CRITICAL` at or above `TEMP_CRITICAL`. There is no invented idle-temperature anchor: distinct idle and low speeds intentionally cause a jump at `TEMP_LOW`.
+
+Interpolation ignores `HYSTERESIS` and the previous level in both directions. Each successful collection cycle uses the current demand immediately, including increases within the same level; unchanged integer duty does not send another fan command. There is no additional smoothing, PID, or rate limit. For example, thresholds `65/70/75/80` and speeds `30/35/45/60/65` produce `45/48/51/54/57/60%` at `70/71/72/73/74/75°C`.
+
+Set `FAN_SPEED_INTERPOLATION=false` to restore the original stepwise behavior: each anchor speed is held until the next threshold, and only downshifts wait for the temperature to reach the previous level threshold minus `HYSTERESIS` (equality releases the hold). Upshifts are immediate. In the TUI, change this switch under **Fan curve**; `config` and read-only `diagnose` show the mode and whether hysteresis is active.
+
+Each source owns its adjustment: local and remote GPUs subtract their configured offset, Linux disks subtract `LINUX_DISK_TEMP_OFFSET`, and all results have a minimum of 0°C.
 
 ## Configuration reference
 
@@ -244,8 +253,9 @@ Moving to a lower fan level requires the temperature to fall by `HYSTERESIS` deg
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TEMP_LOW/MEDIUM/HIGH/CRITICAL` | `65/70/75/80` | Strictly increasing thresholds in °C |
-| `FAN_SPEED_IDLE/LOW/MEDIUM/HIGH/CRITICAL` | `25/30/40/50/60` | Values from 1–100% that must not decrease |
-| `HYSTERESIS` | `2` | Degrees below the previous threshold required before lowering fan speed |
+| `FAN_SPEED_IDLE/LOW/MEDIUM/HIGH/CRITICAL` | `30/30/40/50/60` | Values from 1–100% that must not decrease; unset idle follows low |
+| `FAN_SPEED_INTERPOLATION` | `true` | Piecewise linear interpolation with ceiling rounding; `false` restores legacy steps |
+| `HYSTERESIS` | `2` | Stepwise mode only: degrees below the previous threshold required before lowering fan speed |
 | `FAILSAFE_ON_ERROR` | `true` | Uses a conservative speed when all sources fail |
 | `FAILSAFE_FAN_SPEED` | `70` | Must be greater than or equal to the critical speed |
 | `MANUAL_FAN_SPEED` | `35` | Used by `manual` when no argument is provided |
@@ -360,7 +370,7 @@ make validate-example # DRY_RUN smoke test that does not require .env
 make docker-build
 ```
 
-Tests cover the source interface, Linux SMART collection, multi-host remote GPUs, source offsets, SDR parsing, hysteresis, fail-safe behavior, configuration validation, credential redaction, health freshness, diagnostics, and safe TUI configuration round-trips. Real hardware, SSH targets, disks, iDRAC, and GPUs must still be verified with `diagnose` on your management network.
+Tests cover the source interface, Linux SMART collection, multi-host remote GPUs, source offsets, SDR parsing, interpolation anchors/rounding/bounds, legacy hysteresis, control-cycle state and fail-safe recovery, configuration validation, credential redaction, health freshness, diagnostics, and safe TUI configuration round-trips. Real hardware, SSH targets, disks, iDRAC, and GPUs must still be verified with `diagnose` on your management network.
 
 ## Project structure
 
