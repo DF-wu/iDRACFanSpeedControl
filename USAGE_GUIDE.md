@@ -165,13 +165,26 @@ GPU_TEMP_OFFSET=15
 
 同時確認 Compose 的 `gpus: all` 已啟用、主機有 NVIDIA Container Toolkit，再用 `diagnose` 驗證；GPU 失敗不應被悄悄當作 0°C。
 
-### 降低閾值附近的跳速
+### 線性插值與階梯模式
 
 ```dotenv
+FAN_SPEED_INTERPOLATION=true
+```
+
+預設開啟，舊 `.env` 沒有此選項也會啟用。TUI 的 **Fan curve** 可切換，Compose 經由既有 `env_file: .env` 傳入；修改後需重建容器才會套用。`config` 與唯讀 `diagnose` 會顯示目前模式及遲滯是否生效。
+
+插值以 `TEMP_LOW/MEDIUM/HIGH/CRITICAL` 及相對應的 `FAN_SPEED_LOW/MEDIUM/HIGH/CRITICAL` 為錨點，錨點間線性計算並向上取整為整數 duty。低於 `TEMP_LOW` 保留 `FAN_SPEED_IDLE`，達到／超過 `TEMP_CRITICAL` 固定為 critical speed；idle 與 low 不同時在 `TEMP_LOW` 會跳差，沒有另設 idle 溫度錨點。例如閾值 `65/70/75/80`、速度 `30/35/45/60/65` 時，`70/71/72/73/74/75°C` 對應 `45/48/51/54/57/60%`。
+
+插值模式不使用 `HYSTERESIS`，不受前次 level 限制。每次收集後立即依需求升降速，同 level 內也會更新；整數 duty 相同時不重送命令。不加入額外平滑、PID 或速率限制。感測器最大值、offset、異常讀值過濾與 fail-safe 保護維持原有行為。
+
+若要恢復原本階梯模式與降檔遲滯：
+
+```dotenv
+FAN_SPEED_INTERPOLATION=false
 HYSTERESIS=3
 ```
 
-Hysteresis 只延遲降檔，不延遲升檔。若溫度持續上升，critical 仍會立即生效。
+此時每檔維持固定速度；Hysteresis 只延遲降檔，溫度降到前一檔閾值減 `HYSTERESIS`（含等號）就釋放。升檔不延遲，critical 仍會立即生效。
 
 ### 提高感測器失敗時的保護
 

@@ -2,6 +2,8 @@ services:
   idrac-fan-control:
     image: ghcr.io/df-wu/idrac-fan-control:latest
     container_name: idrac-fan-control
+    # Fan options, including FAN_SPEED_INTERPOLATION=true by default, come
+    # from .env. Set it to false there for legacy steps and downshift hysteresis.
     env_file:
       - .env
     volumes:

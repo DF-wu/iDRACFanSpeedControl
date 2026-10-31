@@ -126,6 +126,7 @@ test_esxi_password_is_not_in_process_arguments() {
 }
 
 test_temperature_levels() {
+    FAN_SPEED_INTERPOLATION=false
     TEMP_LOW=65
     TEMP_MEDIUM=70
     TEMP_HIGH=75
@@ -145,6 +146,7 @@ test_temperature_levels() {
 }
 
 test_hysteresis_only_delays_downshift() {
+    FAN_SPEED_INTERPOLATION=false
     TEMP_LOW=65
     TEMP_MEDIUM=70
     TEMP_HIGH=75
@@ -553,6 +555,178 @@ test_diagnose_reports_read_only_source_and_preview() {
     assert_contains "decision preview" "$output" "diagnose previews the fan decision"
 }
 
+# Isolate curve settings and hardware stubs while retaining assertion totals.
+run_isolated_test() {
+    local count
+    count="$("$1")"
+    PASS_COUNT="$count"
+}
+
+interpolation_test_curve() {
+    TEMP_LOW=65 TEMP_MEDIUM=70 TEMP_HIGH=75 TEMP_CRITICAL=80
+    FAN_SPEED_IDLE=30 FAN_SPEED_LOW=35 FAN_SPEED_MEDIUM=45
+    FAN_SPEED_HIGH=60 FAN_SPEED_CRITICAL=65 HYSTERESIS=2
+}
+
+test_interpolation_enabled_by_default() {
+    local output
+    output="$(env -u FAN_SPEED_INTERPOLATION bash -c '
+        source "$1"
+        TEMP_LOW=65 TEMP_MEDIUM=70 TEMP_HIGH=75 TEMP_CRITICAL=80
+        FAN_SPEED_LOW=30 FAN_SPEED_MEDIUM=40 FAN_SPEED_HIGH=50 FAN_SPEED_CRITICAL=60
+        choose_fan_speed 72
+    ' bash "${ROOT_DIR}/src/FanControlWithEsxiSmart.sh")"
+    assert_eq $'medium\t44' "$output" "missing switch enables interpolation"
+}
+
+test_interpolation_anchors_rounding_and_bounds() (
+    interpolation_test_curve
+    FAN_SPEED_INTERPOLATION=true
+    local temp level speed previous=0
+    local -a cases=(
+        '0 idle 30' '64 idle 30' '65 low 35' '66 low 37'
+        '69 low 43' '70 medium 45' '71 medium 48' '72 medium 51'
+        '73 medium 54' '74 medium 57' '75 high 60' '76 high 61'
+        '79 high 64' '80 critical 65' '120 critical 65'
+    )
+    for fixture in "${cases[@]}"; do
+        read -r temp level speed <<< "$fixture"
+        assert_eq "${level}"$'\t'"${speed}" "$(choose_fan_speed "$temp" critical)" "interpolates ${temp}C regardless of previous level"
+    done
+    for ((temp=0; temp<=120; temp++)); do
+        IFS=$'\t' read -r level speed <<< "$(choose_fan_speed "$temp")"
+        (( speed >= previous && speed >= 30 && speed <= 65 )) || fail "curve must be monotonic and bounded at ${temp}C"
+        previous="$speed"
+    done
+    pass
+
+    TEMP_LOW=10 TEMP_MEDIUM=13 TEMP_HIGH=20 TEMP_CRITICAL=31
+    FAN_SPEED_IDLE=1 FAN_SPEED_LOW=1 FAN_SPEED_MEDIUM=2 FAN_SPEED_HIGH=6 FAN_SPEED_CRITICAL=100
+    assert_eq $'idle\t1' "$(choose_fan_speed 9)" "preserves minimum idle duty below the first anchor"
+    assert_eq $'low\t1' "$(choose_fan_speed 10)" "preserves minimum anchor duty"
+    assert_eq $'low\t2' "$(choose_fan_speed 11)" "ceil fractional duty in a three-degree segment"
+    assert_eq $'medium\t3' "$(choose_fan_speed 14)" "uses actual uneven segment width"
+    assert_eq $'high\t49' "$(choose_fan_speed 25)" "ceil duty in an eleven-degree segment"
+    assert_eq $'critical\t100' "$(choose_fan_speed 120)" "clamps to maximum duty"
+    TEMP_MEDIUM=14
+    assert_eq $'low\t2' "$(choose_fan_speed 12)" "ceil demand at an exact segment midpoint"
+    FAN_SPEED_IDLE=100 FAN_SPEED_LOW=100 FAN_SPEED_MEDIUM=100 FAN_SPEED_HIGH=100
+    assert_eq $'medium\t100' "$(choose_fan_speed 16)" "accepts flat fan anchors"
+    printf '%s\n' "$PASS_COUNT"
+)
+
+test_legacy_mode_exact_hysteresis() (
+    interpolation_test_curve
+    FAN_SPEED_INTERPOLATION=false
+    assert_eq $'medium\t45' "$(choose_fan_speed 72)" "disabled interpolation restores stepwise speed"
+    assert_eq $'high\t60' "$(choose_fan_speed 74 high)" "legacy retains downshift inside band"
+    assert_eq $'medium\t45' "$(choose_fan_speed 73 high)" "legacy releases at exact hysteresis boundary"
+    assert_eq $'critical\t65' "$(choose_fan_speed 80 idle)" "legacy never delays upward cooling"
+    assert_eq $'low\t35' "$(choose_fan_speed 64 low)" "legacy retains low near idle boundary"
+    assert_eq $'idle\t30' "$(choose_fan_speed 63 low)" "legacy releases low at boundary"
+    assert_eq $'idle\t30' "$(choose_fan_speed 60 critical)" "legacy supports multi-level downshift"
+    printf '%s\n' "$PASS_COUNT"
+)
+
+test_interpolation_validation_and_config() (
+    interpolation_test_curve
+    OPERATION_MODE=auto TEMPERATURE_SOURCES=idrac WITH_GPU_TEMP=false DRY_RUN=true
+    FAN_SPEED_INTERPOLATION=invalid
+    if validate_config auto >/dev/null 2>&1; then
+        fail "reject invalid interpolation boolean"
+    fi
+    pass
+    # Recovery must remain available even if the new curve option is malformed.
+    validate_config restore >/dev/null 2>&1 || fail "invalid interpolation must not block restore"
+    pass
+    FAN_SPEED_INTERPOLATION=true
+    validate_config auto >/dev/null 2>&1 || fail "accept enabled interpolation"
+    assert_contains 'piecewise linear' "$(print_effective_config)" "effective config identifies interpolation"
+    assert_contains 'inactive' "$(print_effective_config)" "effective config explains unused hysteresis"
+    FAN_SPEED_INTERPOLATION=false
+    validate_config auto >/dev/null 2>&1 || fail "accept disabled interpolation"
+    assert_contains 'stepwise' "$(print_effective_config)" "effective config identifies legacy mode"
+    printf '%s\n' "$PASS_COUNT"
+)
+
+test_control_cycle_interpolation_and_recovery() (
+    interpolation_test_curve
+    FAN_SPEED_INTERPOLATION=true FAILSAFE_ON_ERROR=true FAILSAFE_FAN_SPEED=70
+    LAST_LEVEL=high LAST_SPEED=60
+    local reading=74 broken=false
+    local -a applied=()
+    get_decision_temperature() {
+        [[ "$broken" == false ]] || return 1
+        printf '%s\ttest sensor\n' "$reading"
+    }
+    set_fan_speed() { applied+=("$1"); }
+    control_cycle >/dev/null 2>&1
+    assert_eq 57 "$LAST_SPEED" "control cycle cools down without level hysteresis plateau"
+    assert_eq medium "$LAST_LEVEL" "level remains the raw temperature band"
+    reading=73
+    control_cycle >/dev/null 2>&1
+    assert_eq 54 "$LAST_SPEED" "updates speed within the same level"
+    reading=74
+    control_cycle >/dev/null 2>&1
+    assert_eq 57 "$LAST_SPEED" "upward interpolation is immediate within a level"
+    control_cycle >/dev/null 2>&1
+    assert_eq '57 54 57' "${applied[*]}" "only changed duty sends a command"
+    broken=true
+    control_cycle >/dev/null 2>&1
+    assert_eq 70 "$LAST_SPEED" "all-source failure enters failsafe"
+    assert_eq failsafe "$LAST_LEVEL" "records failsafe state"
+    broken=false reading=72
+    control_cycle >/dev/null 2>&1
+    assert_eq 51 "$LAST_SPEED" "recovers from failsafe to interpolated demand"
+    assert_eq medium "$LAST_LEVEL" "clears failsafe level after recovery"
+    set_fan_speed() { return 1; }
+    reading=75
+    if control_cycle >/dev/null 2>&1; then fail "failed duty command must fail cycle"; fi
+    assert_eq 51 "$LAST_SPEED" "failed command does not overwrite last successful speed"
+    assert_eq medium "$LAST_LEVEL" "failed command does not overwrite last successful level"
+    set_fan_speed() { applied+=("$1"); }
+    FAN_SPEED_INTERPOLATION=false LAST_LEVEL=high LAST_SPEED=60 reading=74
+    control_cycle >/dev/null 2>&1
+    assert_eq 60 "$LAST_SPEED" "legacy control cycle retains downshift hysteresis"
+    reading=73
+    control_cycle >/dev/null 2>&1
+    assert_eq 45 "$LAST_SPEED" "legacy control cycle releases hysteresis exactly"
+    broken=true
+    control_cycle >/dev/null 2>&1
+    broken=false reading=72
+    control_cycle >/dev/null 2>&1
+    assert_eq 45 "$LAST_SPEED" "legacy recovers from failsafe without an unknown-level hold"
+    printf '%s\n' "$PASS_COUNT"
+)
+
+test_diagnose_interpolation_modes() (
+    interpolation_test_curve
+    OPERATION_MODE=auto TEMPERATURE_SOURCES=idrac WITH_GPU_TEMP=false DRY_RUN=false
+    LOG_DIR=""
+    local output
+    run_ipmitool() {
+        [[ "$*" == 'mc info' ]] || fail "diagnose must not send a fan command"
+        printf 'Firmware Revision : test\n'
+    }
+    get_idrac_temperatures() { printf 'idrac\tTest sensor\t72\n'; }
+    FAN_SPEED_INTERPOLATION=true
+    output="$(diagnose_mode)"
+    assert_contains '72C -> medium (51%)' "$output" "diagnose previews interpolated duty"
+    assert_contains 'piecewise linear' "$output" "diagnose identifies interpolation mode"
+    assert_contains 'inactive' "$output" "diagnose explains inactive hysteresis"
+    FAN_SPEED_INTERPOLATION=false
+    output="$(diagnose_mode)"
+    assert_contains '72C -> medium (45%)' "$output" "diagnose previews legacy duty"
+    assert_contains 'stepwise' "$output" "diagnose identifies legacy mode"
+    printf '%s\n' "$PASS_COUNT"
+)
+
+run_isolated_test test_diagnose_interpolation_modes
+test_interpolation_enabled_by_default
+run_isolated_test test_interpolation_anchors_rounding_and_bounds
+run_isolated_test test_legacy_mode_exact_hysteresis
+run_isolated_test test_interpolation_validation_and_config
+run_isolated_test test_control_cycle_interpolation_and_recovery
 test_normalize_sources
 test_temperature_sources_share_complete_interface
 test_hex_formatting

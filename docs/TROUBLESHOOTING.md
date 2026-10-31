@@ -49,7 +49,7 @@ iDRAC Fan Control diagnostics (read-only)
 [PASS] iDRAC/IPMI           2.60, PowerEdge R730xd
 [PASS] source:idrac         Inlet Temp=24C, Exhaust Temp=39C
 [PASS] source:esxi          t10.NVMe...=46C
-[PASS] decision preview     46C -> idle (25%), no command sent
+[PASS] decision preview     46C -> idle (30%), no command sent
 
 Result: PASS - controller dependencies are ready.
 ```
@@ -201,4 +201,10 @@ docker inspect idrac-fan-control --format '{{json .Mounts}}'
 
 請勿附上 `.env`、密碼、SSH private key、公開可達的管理 IP 或完整 service tag。
 
-文件最後檢視：2026-08-15。
+## 插值模式與預期速度不同
+
+`FAN_SPEED_INTERPOLATION` 預設為 `true`，包括未設定此選項的舊 `.env`。先用 `config` 確認模式與四個錨點，再用唯讀 `diagnose` 檢查目前最高有效調整溫度對應的 duty；插值會向上取整，並忽略 `HYSTERESIS`。同一 level 中的 duty 也可能不同，日誌 level 僅表示溫度區間。
+
+低於 `TEMP_LOW` 仍使用 idle，達到 `TEMP_LOW` 使用 low；兩者不同時會跳差，不會在兩者間另造溫度錨點。達到／超過 critical 固定使用 critical speed。若要保留舊階梯行為與只延遲降檔的遲滯，設 `FAN_SPEED_INTERPOLATION=false`，並在更新 `.env` 後重建容器。TUI 的 **Fan curve** 也可切換。診斷不會送出風扇控制命令。
+
+文件最後檢視：2026-11-01。
