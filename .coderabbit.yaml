@@ -8,7 +8,7 @@ tone_instructions: >-
 reviews:
   profile: chill
   auto_approvals:
-    enabled: false
+    enabled: true
   high_level_summary: false
   poem: false
   in_progress_fortune: false
