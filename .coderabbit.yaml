@@ -1,7 +1,39 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: en-US
+enable_free_tier: true
+tone_instructions: >-
+  Use concise engineering English. Prioritize actionable correctness, security,
+  and regression findings with concrete evidence. Avoid style-only nitpicks,
+  praise, and repeated summaries.
 reviews:
+  profile: chill
+  auto_approvals:
+    enabled: false
+  high_level_summary: false
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  suggested_labels: false
+  suggested_reviewers: false
   auto_review:
     enabled: true
     auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
     drafts: false
+    base_branches:
+      - ".*"
+  path_instructions:
+    - path: "src/**"
+      instructions: >-
+        Check Bash quoting, numeric and configuration validation, bounded external
+        commands, temperature aggregation, fan-curve boundaries, and fail-safe or
+        automatic-restoration regressions. Preserve TUI configuration round trips
+        and redaction. Do not suggest live hardware commands as verification.
+    - path: "docker-compose.yml"
+      instructions: >-
+        Check environment defaults, read-only secret mounts, device access and
+        persistent logs against the controller's runtime requirements. Preserve
+        explicit opt-in for optional temperature sources and hardware access.
+chat:
+  auto_reply: false
+  art: false
