@@ -6,7 +6,7 @@ The controller treats every temperature provider through the same interface. `co
 
 Register a source ID in `TEMPERATURE_SOURCE_IDS`, then implement these Bash functions in `src/FanControlWithEsxiSmart.sh`:
 
-```bash
+```text
 temperature_source_<id>_validate() { ...; }
 temperature_source_<id>_collect() { ...; }
 temperature_source_<id>_adjust() { ...; }
@@ -22,7 +22,7 @@ Each collection record has this format:
 source_id<TAB>sensor_label<TAB>raw_temperature_celsius
 ```
 
-Labels must not contain tabs or newlines. A source must reject missing, malformed, or unsupported readings instead of emitting `0`. The controller applies every source's `adjust` method, logs both raw and adjusted values when they differ, and selects the highest adjusted temperature.
+Labels must not contain tabs or newlines. A source must reject missing, malformed, or unsupported readings instead of emitting `0`. The controller rejects raw temperatures outside −20…150°C before applying every source's `adjust` method, logs both raw and adjusted values when they differ, and selects the highest adjusted temperature.
 
 `temperature_source_interface_complete` checks the contract during validation. The supported source list is an allowlist, so an environment value cannot invoke an arbitrary shell function.
 
@@ -55,7 +55,7 @@ Grant access only to selected devices. Raw disk access is sensitive even though 
 
 ## TrueNAS CD6 plus remote GPU VMs
 
-The following configuration combines a TrueNAS-hosted Kioxia CD6 with GPUs in two Linux VMs:
+The following example combines a TrueNAS-hosted Kioxia CD6 with GPUs in two Linux VMs. Discover the real disk path on your own host; `/dev/nvme1` is not a universal CD6 identifier:
 
 ```dotenv
 TEMPERATURE_SOURCES=linux_disk,remote_gpu
