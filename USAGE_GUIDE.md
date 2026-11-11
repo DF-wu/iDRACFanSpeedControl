@@ -1,18 +1,37 @@
-# iDRAC Fan Control 日常 Runbook
+# Operations guide
 
-這份文件給已完成初始設定的操作者。第一次安裝、參數定義與架構請先看 [README.md](README.md)；遇到錯誤則直接跳到 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
+For first installation, prerequisites, configuration variables, and hardware limitations, start with [README.md](README.md). For errors, use [troubleshooting](docs/TROUBLESHOOTING.md). Commands below assume the repository directory, a reviewed `.env`, and the selected Compose image. They are operator instructions, not evidence of hardware testing.
 
-## 每次變更前的安全習慣
+## Before starting
 
-```text
-編輯 .env → validate → diagnose → manual 小幅測試 → restore → 啟動 auto
+1. Keep iDRAC Web UI or physical console access available. Historical testing covers only one R730xd with iDRAC 8; verify your own model and firmware.
+2. Create `.env` with `make tui` or copy `.env.example`, set permissions to `600`, and replace selected-source placeholders. Keep `OPERATION_MODE=auto` for the long-running Compose service.
+3. Prepare directories and the image, then perform checks that do not change fans:
+
+   ```bash
+   mkdir -p logs secrets
+   docker compose pull
+   make validate
+   docker compose run --rm --no-deps idrac-fan-control config
+   docker compose run --rm --no-deps idrac-fan-control diagnose
+   ```
+
+`validate` checks the configured `OPERATION_MODE`; it does not test connectivity. `diagnose` validates all selected sources, reads hardware/SSH endpoints, and creates/touches the log path without sending fan raw commands. Check each device/host warning as well as the overall result: a multi-target source passes if at least one target supplies a reading. Review the selected temperature and predicted duty against your hardware needs.
+
+Before unattended operation, stop any active controller, test a conservative manual duty while watching iDRAC temperatures/fans, and explicitly restore. For example:
+
+```bash
+docker compose stop --timeout 90
+docker compose run --rm --no-deps idrac-fan-control manual 70
+docker compose run --rm --no-deps idrac-fan-control status
+docker compose run --rm --no-deps idrac-fan-control restore
 ```
 
-永遠保留一個能登入 iDRAC Web UI 的工作階段。`diagnose` 只讀取，不等於 `manual` 已在你的機型上驗證；第一次仍應完成一次低速、一次保守速度與一次 restore。
+These commands change hardware. No duty is universally safe. `status` shows chassis and temperatures, not proof of the selected fan duty; verify fans and firmware automatic control in iDRAC. If any command fails, keep the controller stopped and resolve recovery before proceeding.
 
-## 每日操作
+## Daily operation
 
-啟動、查看狀態與持續 log：
+After the supervised checks:
 
 ```bash
 docker compose up -d
@@ -21,206 +40,106 @@ docker logs -f idrac-fan-control
 tail -f logs/fan_control.log
 ```
 
-`fan_control.log` 的每一筆成功 cycle 會包含 status、決策溫度、level、fan 與來源細節。若 container 顯示 `unhealthy`，不要只重啟；先執行：
+A successful cycle records `status=ok`, temperature, level, duty, and source details. All-source failure with `FAILSAFE_ON_ERROR=true` writes `status=failsafe` and applies `FAILSAFE_FAN_SPEED`. Partial failures continue with remaining readings; investigate them because the hottest component may be missing. With fail-safe disabled, all-source failure leaves the previous fan state and writes no new cycle record.
+
+The healthcheck measures log freshness in `OPERATION_MODE=auto`, including fail-safe records. It does not prove safe temperatures, complete source coverage, or hardware response. Outside `auto`, it only validates configuration. Docker does not restart containers solely because they become unhealthy.
 
 ```bash
-docker compose run --rm idrac-fan-control healthcheck
-docker compose run --rm idrac-fan-control diagnose
+docker compose exec idrac-fan-control /usr/local/bin/fan-control.sh healthcheck
+docker compose run --rm --no-deps idrac-fan-control diagnose
 ```
 
-執行一次控制（適合維護視窗）：
+Use `exec` for the running controller healthcheck; a one-off `run ... healthcheck` uses the current disk `.env`, which may differ from the running container after edits. `config` is redacted, but review hostnames and addresses before sharing it.
+
+## Manual and one-cycle operation
+
+Stop the continuous controller first. `once` reads temperatures and applies one curve/fail-safe decision; `manual 70` applies a fixed duty. Both leave manual control active after exit. Only continuous `auto` has an exit restoration trap.
 
 ```bash
-docker compose run --rm idrac-fan-control once
+docker compose stop --timeout 90
+docker compose run --rm --no-deps idrac-fan-control once
+# Observe the hardware, then explicitly restore:
+docker compose run --rm --no-deps idrac-fan-control restore
 ```
 
-查看不改變風扇的摘要：
+Manual accepts integer duty from 1–100. Without a CLI speed, it uses `MANUAL_FAN_SPEED` (template: `35`; runtime default: empty). Without either, it prompts on a terminal or fails with noninteractive stdin. Do not put `once` or `manual` into the long-running service: its restart policy can repeatedly execute them.
+
+`DRY_RUN=true` suppresses IPMI calls, including restoration. It does not simulate sensor data or suppress SSH, `nvidia-smi`, or `smartctl` queries. Use `make test` and `make validate-example` for offline verification.
+
+## Stop and restore Dell automatic control
+
+Stop the loop **before the final restore**, so another cycle cannot retake manual control:
 
 ```bash
-docker compose run --rm idrac-fan-control config
-docker compose run --rm idrac-fan-control status
+docker compose stop --timeout 90
+docker compose run --rm --no-deps -e DRY_RUN=false idrac-fan-control restore
 ```
 
-## TUI 設定與變更流程
+Confirm the restore command succeeded and verify firmware automatic control and temperatures in iDRAC. Keep the service stopped until the problem is understood. After successful recovery, `docker compose down` can remove the stopped service; logs remain in `./logs`.
+
+`RESTORE_AUTO_ON_EXIT=true` is best-effort. Bash can defer signal handling while waiting for a foreground query or sleep; the default Compose stop timeout can expire first. The explicit 90-second wait accommodates the default 60-second sleep and usual command timing, but longer intervals, multiple slow sources, SIGKILL, host failure, or lost IPMI connectivity can still prevent trap restoration. The separate restore command remains required. If Docker or IPMI is unavailable, use the supported iDRAC/console recovery procedure for your server and verify cooling there.
+
+For an incident, capture evidence after recovery:
 
 ```bash
-make tui
+docker logs --tail 200 idrac-fan-control > incident-container.log 2>&1
+docker compose run --rm --no-deps idrac-fan-control config > incident-config.txt
+docker compose run --rm --no-deps idrac-fan-control diagnose > incident-diagnose.txt 2>&1
 ```
 
-TUI 的每個子頁會直接更新 `.env`，退出時不會自動啟動服務。建議順序：
+Review these files before sharing. Never upload `.env`, private keys, service tags, or management credentials.
 
-1. `Review redacted configuration` 確認來源、曲線與 fail-safe；密碼只會顯示為 set／長度。
-2. `Validate configuration` 修正所有 ERROR；不要把 WARN 當成成功的替代品。
-3. `Run read-only diagnostics` 確認每個選取的 source 都是 PASS。
-4. 回到 shell，執行 `docker compose up -d`。
+## Configuration changes and optional sources
 
-如果只要改一個值，手動編輯 `.env` 也可以；不要直接改容器裡的檔案，因為 container 會被重建。
+`make tui` saves each submenu directly to `.env` and does not start the service. Stop and restore before changing the deployed configuration; use the root `.env`, review `config`, validate, diagnose, and repeat supervised checks as needed. Recreate the container with `docker compose up -d --force-recreate` after validation. `docker compose restart` does not reload environment changes.
 
-## 手動風扇與還原
+- `idrac`: start with `TEMPERATURE_SOURCES=idrac`; inspect the sensor list and choose filters that cover relevant heat sources.
+- `esxi`: configure host, username, password or key, and the full `DRIVE_DEVICE`. Use the identifier commands in [README.md](README.md#finding-the-esxi-drive-identifier).
+- `linux_disk`: configure exact device paths and corresponding Compose `devices` mappings. Discover paths on your host; `/dev/nvme1` is an example, not a universal CD6 identifier.
+- `gpu`: enable Compose `gpus: all` and install the host driver/toolkit before diagnostics.
+- `remote_gpu`: configure hosts and a shared SSH identity. Every host must expose `nvidia-smi` in its noninteractive SSH PATH.
 
-先在低風險維護時段測試：
+For keys, copy only the selected identity into `./secrets`, restrict it to `600`, and reference `/run/secrets/<filename>` in `.env`. New containers do not persist learned SSH host keys by default; provision a verified `known_hosts` mount and use `SSH_STRICT_HOST_KEY_CHECKING=yes` where required. See [source deployment examples](docs/TEMPERATURE_SOURCES.md).
+
+Interpolation is now default even when an old `.env` omits the switch. It rounds duty upward between four anchors and ignores hysteresis. Set `FAN_SPEED_INTERPOLATION=false` to retain stepwise control with downshift-only hysteresis. See the [curve reference](README.md#temperature-sources-and-control-decisions).
+
+## Upgrade and rollback
+
+`latest` is mutable and follows default-branch builds. Before an upgrade, record the running image reference/digest and code revision, and back up `.env` plus Compose overrides privately:
 
 ```bash
-docker compose run --rm idrac-fan-control manual 30
-docker compose run --rm idrac-fan-control status
-docker compose run --rm idrac-fan-control manual 70
-docker compose run --rm idrac-fan-control restore
+umask 077
+backup_dir="../idrac-fan-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+cp .env docker-compose.yml "$backup_dir/"
+# Also copy any Compose override files you use.
+git rev-parse HEAD > "$backup_dir/code-revision.txt"
+docker inspect idrac-fan-control --format '{{.Config.Image}} {{.Image}}' > "$backup_dir/container-image.txt"
+docker image inspect "$(docker inspect idrac-fan-control --format '{{.Image}}')" \
+  --format '{{json .RepoDigests}}' > "$backup_dir/image-digests.txt"
 ```
 
-`manual` 的百分比範圍是 1–100；`restore` 送出 `raw 0x30 0x30 0x01 0x01`，將控制權交還 Dell。不要用 `DRY_RUN=true` 來判斷真實硬體反應，它只會顯示命令而不觸碰 iDRAC。
-
-## 緊急程序
-
-遇到溫度異常、噪音失控、來源讀值不可信或不確定目前狀態時：
-
-1. 立即還原 Dell 自動控制。
-
-   ```bash
-   docker compose run --rm idrac-fan-control restore
-   ```
-
-2. 停止 controller，避免下一個 cycle 再次覆寫設定。
-
-   ```bash
-   docker compose down
-   ```
-
-3. 從 iDRAC Web UI 或實體主控台確認溫度與風扇；必要時保持 Dell 自動模式。
-
-4. 保存當下輸出供除錯：
-
-   ```bash
-   docker compose run --rm idrac-fan-control config > config-after-incident.txt
-   docker compose run --rm idrac-fan-control diagnose 2>&1 | tee diagnose-after-incident.txt
-   cp .env .env.after-incident
-   chmod 600 .env.after-incident
-   ```
-
-5. 修正來源、曲線或管理網路後，重新走一次 `validate → diagnose → manual → restore`，才恢復 `auto`。
-
-## 常見變更
-
-### 改用 iDRAC sensors，不依賴 ESXi
-
-```dotenv
-TEMPERATURE_SOURCES=idrac
-```
-
-### 混合 ESXi 與 iDRAC
-
-```dotenv
-TEMPERATURE_SOURCES=esxi,idrac
-ESXI_HOST=192.0.2.20
-ESXI_USERNAME=root
-ESXI_SSH_KEY=/run/secrets/esxi_ed25519
-DRIVE_DEVICE=t10.NVMe____full_identifier
-```
-
-準備 key volume（不要提交 `secrets/`）：
-
-```bash
-mkdir -p secrets
-cp ~/.ssh/esxi_ed25519 secrets/esxi_ed25519
-chmod 600 secrets/esxi_ed25519
-```
-
-### TrueNAS CD6 與其他 VM 的 GPU
-
-目前 TrueNAS 25.10 主機上的 Kioxia CD6 controller device 是 `/dev/nvme1`。先在 host 唯讀確認：
-
-```bash
-sudo smartctl -A -j /dev/nvme1 | jq '.temperature.current'
-```
-
-設定 CD6 與多台 NVIDIA VM：
-
-```dotenv
-TEMPERATURE_SOURCES=linux_disk,remote_gpu
-LINUX_DISK_DEVICES=/dev/nvme1
-LINUX_DISK_TEMP_OFFSET=0
-
-REMOTE_GPU_HOSTS=gpu-vm-1,gpu-vm-2
-REMOTE_GPU_USERNAME=monitor
-REMOTE_GPU_SSH_KEY=/run/secrets/gpu_vms_ed25519
-REMOTE_GPU_PASSWORD=
-REMOTE_GPU_SSH_PORT=22
-REMOTE_GPU_TEMP_OFFSET=15
-```
-
-在 `docker-compose.yml` 的 service 加入精確 device mapping：
-
-```yaml
-devices:
-  - /dev/nvme1:/dev/nvme1
-```
-
-每台 GPU VM 必須讓該 SSH 帳號可執行唯讀的 `nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader,nounits`。設定後先跑 `validate` 與 `diagnose`；預期同時看到 `source:linux_disk`、`source:remote_gpu` 和 decision preview。詳見 [Temperature source interface](docs/TEMPERATURE_SOURCES.md)。
-
-### 啟用 GPU
-
-```dotenv
-TEMPERATURE_SOURCES=idrac,gpu
-GPU_TEMP_OFFSET=15
-```
-
-同時確認 Compose 的 `gpus: all` 已啟用、主機有 NVIDIA Container Toolkit，再用 `diagnose` 驗證；GPU 失敗不應被悄悄當作 0°C。
-
-### 線性插值與階梯模式
-
-```dotenv
-FAN_SPEED_INTERPOLATION=true
-```
-
-預設開啟，舊 `.env` 沒有此選項也會啟用。TUI 的 **Fan curve** 可切換，Compose 經由既有 `env_file: .env` 傳入；修改後需重建容器才會套用。`config` 與唯讀 `diagnose` 會顯示目前模式及遲滯是否生效。
-
-插值以 `TEMP_LOW/MEDIUM/HIGH/CRITICAL` 及相對應的 `FAN_SPEED_LOW/MEDIUM/HIGH/CRITICAL` 為錨點，錨點間線性計算並向上取整為整數 duty。低於 `TEMP_LOW` 保留 `FAN_SPEED_IDLE`，達到／超過 `TEMP_CRITICAL` 固定為 critical speed；idle 與 low 不同時在 `TEMP_LOW` 會跳差，沒有另設 idle 溫度錨點。例如閾值 `65/70/75/80`、速度 `30/35/45/60/65` 時，`70/71/72/73/74/75°C` 對應 `45/48/51/54/57/60%`。
-
-插值模式不使用 `HYSTERESIS`，不受前次 level 限制。每次收集後立即依需求升降速，同 level 內也會更新；整數 duty 相同時不重送命令。不加入額外平滑、PID 或速率限制。感測器最大值、offset、異常讀值過濾與 fail-safe 保護維持原有行為。
-
-若要恢復原本階梯模式與降檔遲滯：
-
-```dotenv
-FAN_SPEED_INTERPOLATION=false
-HYSTERESIS=3
-```
-
-此時每檔維持固定速度；Hysteresis 只延遲降檔，溫度降到前一檔閾值減 `HYSTERESIS`（含等號）就釋放。升檔不延遲，critical 仍會立即生效。
-
-### 提高感測器失敗時的保護
-
-```dotenv
-FAILSAFE_ON_ERROR=true
-FAILSAFE_FAN_SPEED=80
-```
-
-`FAILSAFE_FAN_SPEED` 必須不低於 `FAN_SPEED_CRITICAL`；`validate` 會拒絕不安全的遞減曲線。
-
-## 更新與回復
+Stop and explicitly restore using the procedure above. Update only a clean checkout; preserve local Compose changes/overrides and do not discard them to force an update. For a branch following upstream:
 
 ```bash
 git pull --ff-only
+```
+
+Review [migration notes](CHANGELOG.md), merge new `.env.example` options into the protected `.env`, and select the intended image in Compose. Prefer `ghcr.io/df-wu/idrac-fan-control@sha256:<recorded-digest>` or a published version tag over `latest`. `3.0.0` becomes available only after the proposed release is published. Do not paste the digest placeholder literally.
+
+```bash
 docker compose pull
-docker compose up -d
+make validate
+docker compose run --rm --no-deps idrac-fan-control diagnose
+# Repeat supervised manual/restore checks for behavior changes, then:
+docker compose up -d --force-recreate
 docker compose ps
 ```
 
-更新前先備份設定（不要提交到 Git）：
+For rollback, stop and restore again, select the saved known-good image digest (or retained local image), restore the matching code/config/Compose files, validate and diagnose, and only then restart. Restoring old code alone does not change the Compose image. Do not prune the previous image until the new deployment is verified. If the previous version cannot restore or monitor safely, keep Dell automatic control active instead of restarting it.
 
-```bash
-cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
-chmod 600 .env.backup.*
-```
+## Log retention
 
-若新 image 行為不符預期，先 `restore`、`down`，再切回已知版本 image 或回復程式碼；不要在風扇已異常時反覆 `up`。
+The controller appends to a single `logs/fan_control.log`; it does not rotate it. Configure host logrotate/retention and monitor space. Stderr appears in Docker logs; apply a host Docker logging policy as needed.
 
-## 維護與驗證
-
-```bash
-make test
-make validate
-make docker-build
-```
-
-長時間運行請確認 `logs/` 有輪替策略；專案只負責寫入單一 log，不會替主機設定 logrotate。建議以主機的 logrotate 或 journald retention 管理容量。
-
-文件最後檢視：2026-08-15。
+Documentation last reviewed: November 11, 2026.

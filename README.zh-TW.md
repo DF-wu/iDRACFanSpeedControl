@@ -9,7 +9,7 @@
 這是一個給 Dell PowerEdge 使用的風扇控制器。它透過 iDRAC 的 IPMI OEM raw command 設定 fan duty cycle，再以可插拔溫度來源決定風扇曲線：ESXi NVMe SMART、iDRAC sensor、本機 Linux 磁碟，以及本機或遠端 NVIDIA GPU。
 
 > [!CAUTION]
-> 本專案只在我自己的 Dell PowerEdge R730xd（iDRAC 8）上實機測試過；其他伺服器型號與 iDRAC 韌體版本均未驗證，不應假設相容。這個程式會暫時覆寫 Dell 原廠風扇控制，使用風險由使用者自行承擔。第一次設定請保留 iDRAC Web UI 或實體主控台，務必先在自己的硬體上用 `manual`、`restore`、`diagnose` 驗證，再讓 `auto` 長時間執行。任何過熱、讀值不可信或行為異常時，立即執行 `restore` 並停止容器。
+> 本專案只在我自己的 Dell PowerEdge R730xd（iDRAC 8）上實機測試過；其他伺服器型號與 iDRAC 韌體版本均未驗證，不應假設相容。這個程式會暫時覆寫 Dell 原廠風扇控制，使用風險由使用者自行承擔。第一次設定請保留 iDRAC Web UI 或實體主控台，務必先在自己的硬體上用 `manual`、`restore`、`diagnose` 驗證，再讓 `auto` 長時間執行。任何過熱、讀值不可信或行為異常時，先停止控制器，再明確執行 `restore`，並在 iDRAC 確認復原。請見[停止與還原程序](USAGE_GUIDE.md#stop-and-restore-dell-automatic-control)。
 
 ## 先看懂它如何工作
 
@@ -26,11 +26,28 @@ flowchart LR
     CTRL --> LOG[logs/fan_control.log\nhealthcheck]
 ```
 
-控制器只會對 iDRAC 發送風扇命令；溫度來源全部是讀取。每個 provider 都實作同一組 `validate`、`collect`、`adjust` 介面。多來源時採用最高的有效 adjusted temperature；GPU 與磁碟可各自套用 offset，不需在決策流程加入來源特例。
+控制器只會對 iDRAC 發送風扇命令；溫度來源全部是讀取。每個 provider 都實作同一組 `validate`、`collect`、`adjust` 介面。多來源時採用最高的有效 adjusted temperature。原始溫度超出 −20…150°C 會在套用 offset 前被排除；部分來源或目標失敗時會記錄警告，其餘有效讀值仍會控制風扇，因此最熱的元件可能不再參與決策。GPU 與磁碟可各自套用 offset，不需在決策流程加入來源特例。
 
 ![iDRAC IPMI over LAN 設定畫面](images/image.png)
 
 *圖 1：在 iDRAC Web UI 開啟 IPMI over LAN；實際選項名稱會依 iDRAC 韌體版本略有不同。*
+
+## 前置條件與相容性
+
+- Linux Docker 主機，具備 Git、Bash 4+、Make、Docker Engine 與支援 `env_file` 的 Docker Compose。GPU 部署另需支援 `gpus: all` 的 Compose、NVIDIA driver 與 NVIDIA Container Toolkit。
+- 可連線至 iDRAC 管理網路、已啟用 IPMI over LAN，且帳號有權執行 OEM 風扇命令。請保留 iDRAC Web UI 工作階段或實體主控台。
+- 歷史實機測試僅涵蓋**一台 PowerEdge R730xd（iDRAC 8）**，沒有已驗證的韌體相容範圍；R730、其他世代與韌體版本都須自行驗證。IPMI 能登入不代表支援風扇命令。本次文件更新沒有新增實機驗證。
+- 選用來源另需 ESXi SSH 與可讀取的 NVMe SMART、本機 Linux 磁碟映射、本機 NVIDIA GPU，或遠端 NVIDIA 主機的 SSH 權限。先只選 `idrac`，再逐一加入其他來源。僅看進氣溫度未必能反映磁碟與 GPU 熱點，請依硬體挑選感測器與保守曲線。
+
+先確認主機工具：
+
+```bash
+git --version
+bash --version
+make --version
+docker version
+docker compose version
+```
 
 ## 快速開始：用 TUI 完成安全的第一次設定
 
@@ -45,35 +62,41 @@ make tui
 主畫面如下（每次進入子頁都會寫回 `.env`，離開時會再次顯示檔案位置）：
 
 ```text
-╭────────────────────────────────────────────────────────────╮
-│              iDRAC Fan Control · Setup TUI                │
-╰────────────────────────────────────────────────────────────╯
-
-  1) Quick setup wizard       6) Safety, timing, and logging
-  2) iDRAC / IPMI settings    7) Review redacted configuration
-  3) Temperature source       8) Safety, timing, and logging
-  4) ESXi NVMe source         9) Review redacted configuration
-  5) Local Linux disks       10) Validate configuration
-  6) Remote NVIDIA GPUs      11) Run read-only diagnostics
-  7) Fan curve                0) Save and exit
+  1) Quick setup wizard
+  2) iDRAC / IPMI settings
+  3) Temperature source preset
+  4) ESXi NVMe source settings
+  5) Local Linux disk settings
+  6) Remote NVIDIA GPU settings
+  7) Fan curve
+  8) Safety, timing, and logging
+  9) Review redacted configuration
+ 10) Validate configuration
+ 11) Run read-only diagnostics
+  0) Save and exit
 ```
 
-第一次建議選 `iDRAC sensors only`，先不要把外部來源加入決策。TUI 完成後，依序執行：
+第一次建議選 `iDRAC sensors only`，先不要把外部來源加入決策。設定 `OPERATION_MODE=auto`、保留 `RESTORE_AUTO_ON_EXIT=true`、替換所選來源的 placeholder，並在啟動前核對曲線。TUI 只儲存設定，不會啟動服務。完成後依序執行：
 
 ```bash
+mkdir -p logs secrets
+docker compose pull
 make validate
-docker compose run --rm idrac-fan-control diagnose
+docker compose run --rm --no-deps idrac-fan-control config
+docker compose run --rm --no-deps idrac-fan-control diagnose
+```
+
+`diagnose` 不會送出風扇 raw command；會讀取硬體與遠端主機，並建立或 touch 本機 log 路徑。它會逐項顯示 iDRAC、每個溫度來源、可寫 log 路徑與「如果現在控制會選哪一檔」的 preview。若某個來源不用，從 TUI 的 source preset 移除它，而不是忽略錯誤後繼續運行。
+
+完成有人監看的[手動與還原測試](#安全啟動順序)後，才啟動無人值守服務：
+
+```bash
 docker compose up -d
+docker compose ps
 docker logs -f idrac-fan-control
 ```
 
-`diagnose` 是唯讀檢查，不會送出風扇 raw command。它會逐項顯示 iDRAC、每個溫度來源、可寫 log 路徑與「如果現在控制會選哪一檔」的 preview。若某個來源不用，從 TUI 的 source preset 移除它，而不是忽略錯誤後繼續運行。
-
-若要編輯另一份設定檔：
-
-```bash
-src/fan-control-tui.sh --config /path/to/staging.env
-```
+Compose 使用儲存庫根目錄的 `.env`。TUI 的 `--config /path/to/staging.env` 可編輯其他檔案，但 Compose 仍需要根目錄 `.env`；部署前請將核對後的設定複製至該處。替代檔案的診斷不能證明實際部署設定正確。
 
 ### 手動建立 `.env`（不用 TUI 也可以）
 
@@ -121,14 +144,16 @@ docker compose run --rm idrac-fan-control manual 35
 docker compose run --rm idrac-fan-control restore
 ```
 
-本機腳本可直接使用相同命令：
+`manual` 與 `once` 離開後仍維持所選 duty，必須明確執行 `restore`。`RESTORE_AUTO_ON_EXIT` 只適用於持續執行的 `auto`。執行一次性風扇命令前，先停止現有控制器，避免下一個 cycle 覆寫。Compose 使用 `restart: unless-stopped`；服務的 `.env` 請維持 `OPERATION_MODE=auto`，`manual`／`once` 則透過 `docker compose run --rm --no-deps` 一次性執行。
+
+本機腳本接受相同命令，但**不會載入 `.env`**，只讀取已匯出的環境變數；正式部署建議使用 Compose。安全的離線檢查：
 
 ```bash
-src/FanControlWithEsxiSmart.sh diagnose
-src/FanControlWithEsxiSmart.sh config
+make validate-example
+src/FanControlWithEsxiSmart.sh help
 ```
 
-本機執行需要 `bash`、`coreutils`、`ipmitool`、`timeout`。Linux 磁碟模式另需 `smartctl` 與 `jq`；SSH password 模式另需 `sshpass`。Docker image 已包含這些依賴。
+本機執行需要 Bash 4+、GNU coreutils（`timeout`、`stat`）、awk 與 `ipmitool`。Linux 磁碟另需 `smartctl`、`jq`；SSH 來源需要 OpenSSH，密碼認證另需 `sshpass`；本機 GPU 需要 `nvidia-smi`。Docker image 包含 CLI 依賴，但主機仍須提供 NVIDIA driver／toolkit。
 
 ## 安全啟動順序
 
@@ -143,7 +168,7 @@ sequenceDiagram
     C->>D: mc info / SDR (read-only)
     D-->>C: 連線與溫度
     C-->>U: source checks + decision preview
-    U->>C: manual 30
+    U->>C: manual 70 (有人監看的範例)
     C->>D: set fan duty (受控測試)
     U->>C: restore
     C->>D: Dell automatic fan control
@@ -154,9 +179,20 @@ sequenceDiagram
 
 1. iDRAC Web UI 的 IPMI over LAN 已開啟，管理網路可達。
 2. iDRAC 帳號具備必要權限，密碼不再是 placeholder。
-3. `manual 30` 能設定低速，`manual 70` 能設定保守速度，`restore` 能回到 Dell 自動模式。
+3. 停止控制器後，以保守 duty（例如 `manual 70`）測試，同時在 iDRAC 觀察溫度與風扇，再執行 `restore` 並確認 Dell 自動模式。僅在有人監看的維護時段調整；沒有適用所有硬體的安全百分比。
 4. `diagnose` 的每一個已啟用來源都是 `[PASS]`；不用的來源請停用。
 5. 先以較保守的 `FAILSAFE_FAN_SPEED` 和 `RESTORE_AUTO_ON_EXIT=true` 運行。
+
+有人監看的測試範例（**會改變硬體狀態**，僅在自己的相容伺服器上執行）：
+
+```bash
+docker compose stop --timeout 90
+docker compose run --rm --no-deps idrac-fan-control manual 70
+docker compose run --rm --no-deps idrac-fan-control status
+docker compose run --rm --no-deps idrac-fan-control restore
+```
+
+`auto` 是本專案的軟體迴圈，會反覆接管 iDRAC 手動控制；`restore` 才是交還 Dell 韌體演算法。離開時的自動還原只能盡力執行：前景查詢／sleep 會延遲訊號處理、Docker 可能強制終止程序，主機或網路故障也可能阻止 IPMI 還原。請始終遵循明確的[停止與還原程序](USAGE_GUIDE.md#stop-and-restore-dell-automatic-control)。
 
 ## 溫度來源與控制決策
 
@@ -218,11 +254,11 @@ flowchart TD
 | `IDRAC_PASSWORD` | 空 | 由 `IPMI_PASSWORD` environment 傳給 `ipmitool -E`，不出現在 argv |
 | `IPMI_INTERFACE` | `lanplus` | 通常保持不變 |
 | `IPMI_TIMEOUT` / `IPMI_RETRIES` | `5` / `2` | 單次 timeout 與 retry |
-| `OPERATION_MODE` | `manual` | `auto`、`once`、`manual` |
-| `DRY_RUN` | `false` | 只在測試命令組合時使用；不會產生真實讀值 |
+| `OPERATION_MODE` | `manual`（模板：`auto`） | 未帶 CLI 命令時執行的命令 |
+| `DRY_RUN` | `false` | 只抑制 IPMI；SSH、GPU 與磁碟收集仍可能執行，不是離線沙箱 |
 | `COMMAND_TIMEOUT` | `20` | SSH、IPMI、GPU 外部命令上限（秒） |
 | `CHECK_INTERVAL` | `60` | auto 每個 cycle 間隔（秒） |
-| `RESTORE_AUTO_ON_EXIT` | `true` | auto 收到 SIGTERM／離開時還原 |
+| `RESTORE_AUTO_ON_EXIT` | `true` | 僅持續 `auto` 離開時盡力還原；SIGKILL、斷電或網路故障後無法保證 |
 
 ### 溫度來源
 
@@ -258,14 +294,14 @@ flowchart TD
 | `HYSTERESIS` | `2` | 僅階梯模式：降檔所需低於前 threshold 的°C |
 | `FAILSAFE_ON_ERROR` | `true` | 所有來源失敗時使用保守速度 |
 | `FAILSAFE_FAN_SPEED` | `70` | 必須 >= critical speed |
-| `MANUAL_FAN_SPEED` | `35` | `manual` 未帶參數時使用 |
+| `MANUAL_FAN_SPEED` | 空（模板：`35`） | 未帶速度參數時使用；否則在終端提示輸入，非互動 stdin 則失敗 |
 | `LOG_DIR` / `LOG_FILE` | `/var/log/fan-control` / `fan_control.log` | 持久化狀態 log |
 | `LOG_LEVEL` | `INFO` | `DEBUG` 會增加命令與來源細節，絕不列密碼 |
 | `HEALTHCHECK_MAX_AGE` | `0` | 0 代表 `CHECK_INTERVAL*3 + COMMAND_TIMEOUT` |
 
 ## Docker 部署、Linux 磁碟與 GPU
 
-Compose 預設使用 GHCR image、host network 與 `./logs` volume：
+Compose 預設使用 `ghcr.io/df-wu/idrac-fan-control:latest`、Linux host network 與 `./logs` volume。`latest` 跟隨預設分支建置，不是固定版本；升級前記錄可用的 digest，請見[升級與回復](USAGE_GUIDE.md#upgrade-and-rollback)。
 
 ```bash
 docker compose pull
@@ -274,7 +310,7 @@ docker compose ps
 docker inspect --format '{{.State.Health.Status}}' idrac-fan-control
 ```
 
-`healthcheck` 不只驗證 env；在 `OPERATION_MODE=auto` 時也會確認 `fan_control.log` 在 `HEALTHCHECK_MAX_AGE` 內更新。若資料來源全部失敗且 `FAILSAFE_ON_ERROR=false`，控制 cycle 不會寫成功紀錄，容器會變成 unhealthy，這是刻意的安全訊號。
+`healthcheck` 不只驗證 env；在 `OPERATION_MODE=auto` 時也會確認 `fan_control.log` 在 `HEALTHCHECK_MAX_AGE` 內更新。若資料來源全部失敗且 `FAILSAFE_ON_ERROR=false`，控制 cycle 不會寫成功紀錄，容器會變成 unhealthy，這是刻意的安全訊號。Fail-safe 紀錄也會維持 log 新鮮度：`healthy` 不代表所有 sensor 正常或硬體溫度安全。Docker 不會僅因 unhealthy 自動重啟；仍須觀察 log 與 iDRAC。
 
 GPU 模式需要 NVIDIA Container Toolkit。編輯 `docker-compose.yml`，取消 `gpus: all` 註解，再設定：
 
@@ -296,6 +332,8 @@ docker compose run --rm idrac-fan-control diagnose
 docker build --build-arg BASE_IMAGE=ubuntu:24.04 -t idrac-fan-control:local .
 ```
 
+接著將 Compose service 的 `image:` 改為 `idrac-fan-control:local`，再執行 `make validate` 與 `diagnose`。`make docker-build` 也只建立本機 image，不會改變 Compose 部署對象。預設 CUDA 建置以 Linux/amd64 為目標，其他架構未驗證。
+
 Linux 磁碟模式必須將 `LINUX_DISK_DEVICES` 的每個 device 映射進容器，例如：
 
 ```yaml
@@ -312,7 +350,7 @@ services:
 正常 log 範例：
 
 ```text
-2026-07-18 03:12:10 [INFO] Control temp 68C -> low (30%). Sources: idrac:Inlet Temp=68C
+2026-11-11 03:12:10 [INFO] Control temp 68C -> low (36%). Sources: idrac:Inlet Temp=68C
 ```
 
 需要更多上下文時暫時設定：
@@ -334,8 +372,9 @@ docker compose run --rm idrac-fan-control diagnose
 常見最短修復路徑：
 
 ```bash
-# 任何不確定的風險先還原 Dell 自動控制
-docker compose run --rm idrac-fan-control restore
+# 先停止迴圈，再最終還原，避免下一個 cycle 覆寫
+docker compose stop --timeout 90
+docker compose run --rm --no-deps idrac-fan-control restore
 
 # 看目前有效設定與依賴狀態
 docker compose run --rm idrac-fan-control config
@@ -364,13 +403,19 @@ esxcli storage core device smart get -d 't10.NVMe____完整識別字串'
 ## 測試與品質門檻
 
 ```bash
-make test             # bash -n + 52 個核心 assertions + 14 個 TUI assertions
+make test             # Bash 語法檢查與 mock 控制器／TUI 測試
 make validate         # 以 Docker 依賴檢查目前的 .env（不改變風扇）
 make validate-example # 不需要 .env 的 DRY_RUN smoke test
 make docker-build
 ```
 
 測試涵蓋統一 source 介面、Linux SMART 收集、多主機 remote GPU、source offset、SDR parsing、插值錨點／取整／邊界、原本降檔遲滯、控制循環狀態與 fail-safe 復原、設定驗證、credential redaction、health freshness、診斷 preview，以及 TUI 設定檔安全 round-trip。真實硬體、SSH target、磁碟、iDRAC 與 GPU 仍須在管理網路上以 `diagnose` 驗證。
+
+## 版本與貢獻
+
+最新已發布 GitHub release 為 `v2.0.1`（2024-10-23），目前 `master` 已累積多項變更。**`v3.0.0` 僅為提案，尚未發布。** 遷移差異請見 [CHANGELOG.md](CHANGELOG.md)，維護者發布清單請見 [docs/RELEASING.md](docs/RELEASING.md)。舊設定未指定 `FAN_SPEED_INTERPOLATION` 時也會啟用插值；如需原本階梯控制，請明確設為 `false`。
+
+[CONTRIBUTING.md](CONTRIBUTING.md) 說明本機驗證、README 翻譯同步規則，以及免費 OSS CodeRabbit GitHub App 啟用步驟。單獨加入 `.coderabbit.yaml` 不代表已安裝或啟用 App。
 
 ## 專案結構
 
@@ -385,12 +430,16 @@ make docker-build
 │   └── tui.test.sh                  # .env parser / writer 測試
 ├── docs/
 │   ├── TEMPERATURE_SOURCES.md        # Source 介面與部署範例
-│   └── TROUBLESHOOTING.md           # 症狀導向除錯手冊
+│   ├── TROUBLESHOOTING.md           # 症狀導向除錯手冊（英文）
+│   └── RELEASING.md                 # 版本提案與發布清單（英文）
 ├── images/image.png                 # iDRAC IPMI 設定畫面
 ├── .env.example                     # 帶完整註解的設定模板
 ├── docker-compose.yml
 ├── Dockerfile
 ├── Makefile
+├── CHANGELOG.md                     # 未發布變更與遷移說明（英文）
+├── CONTRIBUTING.md                  # 驗證、翻譯同步與 CodeRabbit（英文）
+├── .coderabbit.yaml                 # GitHub App 審查設定
 ├── README.md
 ├── README.zh-TW.md
 └── USAGE_GUIDE.md
@@ -398,10 +447,10 @@ make docker-build
 
 ## 相容性與限制
 
-專案以 Dell PowerEdge R730/R730xd、iDRAC 8 類機型的 OEM fan raw command 為主要驗證目標。其他世代可能相容，但不能假設相同；請在無人值守前完成 `manual`／`restore`／`diagnose`。Sensor 名稱、磁碟權限、SSH access 與 driver 行為會依環境改變，應以實際 diagnostic output 為準。
+歷史實機測試僅涵蓋 PowerEdge R730xd 與 iDRAC 8，沒有其他型號或韌體版本範圍的相容認證；請在無人值守前完成 `manual`／`restore`／`diagnose`。Sensor 名稱、磁碟權限、SSH access 與 driver 行為會依環境改變，應以實際 diagnostic output 為準。
 
 ## 授權
 
 MIT，詳見 [LICENSE](LICENSE)。
 
-文件最後檢視：2026-08-15。
+文件最後檢視：2026-11-11。
